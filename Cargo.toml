@@ -1,0 +1,58 @@
+[package]
+name = "fjord"
+version = "0.1.0"
+edition = "2024"
+authors = ["Sorath Panzer <sorathpanzer@gmail.com>"]
+description = "Dotfiles Manager written in Rust"
+license = "GPL3"
+repository = "https://github.com/sorathpanzer/redot"
+
+[dependencies]
+dirs = "5.0"
+im = "15.1.0" 
+clap = { version = "4.5", features = ["derive"] }  # Added for CLI parsing
+dialoguer = "0.11"  # Added for interactive prompts
+indicatif = "0.17.11"
+
+# [dev-dependencies]
+# tempfile = "3.10.1"
+# assert_cmd = "2.0.14"
+# predicates = "3.1.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+style = { level = "deny", priority = -1 }
+complexity = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+arithmetic_side_effects = "deny"
+enum_glob_use = "deny"
+expect_used = "deny"
+
+[profile.release]
+debug = 0
+opt-level = 3   # ou "z" se priorizares tamanho/velocidade
+lto = "fat"        # Enable link time optimization
+codegen-units = 1 # Reduced to increase optimizations
+panic = 'abort'   # Abort on panic
+strip = true # Strip symbols from binary
+
+[profile.dev]
+debug = 2  # Optionally, disable debug information for development builds
+opt-level = 1   # Optimize for size
+lto = false        # Enable link time optimization
+codegen-units = 16 # Reduced to increase optimizations
+panic = 'abort'   # Abort on panic
+strip = "none" # Strip symbols from binary
+
+[package.metadata.scripts]
+docs = "cargo doc --no-deps --open"
+test-all = "cargo test --all-features"

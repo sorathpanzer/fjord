@@ -401,7 +401,7 @@ fn unlink_recursive<'a>(
     }
 }
 
-// --- Funções de Comando ---
+// --- Funções de Comando com Collect Estratégico ---
 
 fn main_add(
     source: &Path,
@@ -411,7 +411,8 @@ fn main_add(
 ) -> Result<(), DotfilesError> {
     println!("{}", config::messages::ANALYZING_DOTFILES);
 
-    let plan: Vec<PlanAction> = fs::read_dir(source)?
+    // MUDANÇA 5: Lazy evaluation até precisarmos do preview
+    let plan_iterator = fs::read_dir(source)?
         .flatten()
         .filter(|entry| !should_ignore(entry))
         .flat_map(|entry| {
@@ -421,9 +422,11 @@ fn main_add(
                 source,
                 HashSet::new(),
             )
-        })
-        .collect();
+        });
 
+    // Collect estratégico: só quando precisamos contar e mostrar preview
+    let plan: Vec<PlanAction> = plan_iterator.collect();
+    
     let to_create: Vec<_> = plan
         .iter()
         .filter(|a| matches!(a, PlanAction::CreateLink { .. }))
@@ -433,6 +436,7 @@ fn main_add(
         println!("{}", config::messages::NO_LINKS_TO_CREATE);
     } else {
         println!("\n{}:", config::messages::LINKS_TO_CREATE);
+        // Correção: usar for loop em vez de for_each para side effects
         for action in &to_create {
             if let PlanAction::CreateLink { src, dest } = action {
                 println!(
@@ -444,6 +448,7 @@ fn main_add(
             }
         }
         println!();
+        
         if !non_interactive
             && !Confirm::with_theme(&SimpleTheme)
                 .with_prompt(color(config::messages::PROMPT_APPLY_CHANGES, config::colors::WHITE))
@@ -455,25 +460,44 @@ fn main_add(
         }
     }
 
+    // Execução e relatório com collect estratégico
     let results = execute_plan(plan, home_s);
-    println!("\n{}", config::messages::OPERATION_REPORT);
-    let created_count = results
-        .iter()
-        .filter(|r| r.message.starts_with(config::symbols::SUCCESS))
-        .count();
-    let conflict_count = results
-        .iter()
-        .filter(|r| r.message.starts_with(config::symbols::ERROR))
-        .count();
+    display_execution_report(&results);
 
-    for r in &results {
-        if r.message.starts_with(config::symbols::SUCCESS) {
-            println!("{}", color(&r.message, config::colors::GREEN));
-        } else if r.message.starts_with(config::symbols::WARNING) {
-            println!("{}", color(&r.message, config::colors::YELLOW));
-        } else if r.message.starts_with(config::symbols::ERROR) {
-            println!("{}", color(&r.message, config::colors::RED));
-        }
+    Ok(())
+}
+
+// Função pura para relatório - separada da lógica principal
+fn display_execution_report(results: &[ExecResult]) {
+    println!("\n{}", config::messages::OPERATION_REPORT);
+    
+    // Lazy: conta usando iterator com checked arithmetic
+    let (created_count, conflict_count, warning_count) = results
+        .iter()
+        .fold((0_usize, 0_usize, 0_usize), |(created, conflicts, warnings), result| {
+            if result.message.starts_with(config::symbols::SUCCESS) {
+                (created.saturating_add(1), conflicts, warnings)
+            } else if result.message.starts_with(config::symbols::ERROR) {
+                (created, conflicts.saturating_add(1), warnings)
+            } else if result.message.starts_with(config::symbols::WARNING) {
+                (created, conflicts, warnings.saturating_add(1))
+            } else {
+                (created, conflicts, warnings)
+            }
+        });
+
+    // Correção: usar for loop em vez de for_each para side effects
+    for result in results {
+        let color_code = if result.message.starts_with(config::symbols::SUCCESS) {
+            config::colors::GREEN
+        } else if result.message.starts_with(config::symbols::WARNING) {
+            config::colors::YELLOW
+        } else if result.message.starts_with(config::symbols::ERROR) {
+            config::colors::RED
+        } else {
+            config::colors::WHITE
+        };
+        println!("{}", color(&result.message, color_code));
     }
 
     if created_count > 0 || conflict_count > 0 {
@@ -486,19 +510,25 @@ fn main_add(
             "{}",
             color(&format!("  Conflitos encontrados: {conflict_count}"), config::colors::RED)
         );
+        if warning_count > 0 {
+            println!(
+                "{}",
+                color(&format!("  Avisos: {warning_count}"), config::colors::YELLOW)
+            );
+        }
     }
-
-    Ok(())
 }
 
 fn main_del(source: &Path, home: &Path, home_s: &str) -> Result<(), DotfilesError> {
+    // MUDANÇA 5: Máxima lazy evaluation - só materializa na última iteração (println)
     fs::read_dir(source)?
         .flatten()
         .filter(|entry| !should_ignore(entry))
         .flat_map(|entry| {
             unlink_recursive(entry.path(), home.join(entry.file_name()), source, home_s)
         })
-        .for_each(|r| println!("{}", color(&r, config::colors::YELLOW)));
+        .for_each(|message| println!("{}", color(&message, config::colors::YELLOW)));
+    
     Ok(())
 }
 

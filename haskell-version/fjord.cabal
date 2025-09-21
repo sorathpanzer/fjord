@@ -1,0 +1,29 @@
+cabal-version:      3.0
+name:               fjord
+version:            0.1.0.0
+license:            GPL-3.0-only
+license-file:       LICENSE
+author:             sorathpanzer
+maintainer:         sorathpanzer
+category:           System
+build-type:         Simple
+extra-doc-files:    CHANGELOG.md
+
+common warnings
+    ghc-options: -Wall -Wextra -Wmissing-signatures -Wunused-top-binds -Wname-shadowing -Wincomplete-patterns
+
+executable fjord
+    import:           warnings
+    main-is:          Main.hs
+    hs-source-dirs:   app
+    default-language: GHC2021
+    build-depends:
+        base ^>=4.19.2.0
+        , transformers
+        , containers
+        , optparse-applicative
+        , directory
+        , filepath
+        , process
+
+

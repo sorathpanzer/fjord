@@ -267,10 +267,8 @@ getDotfiles repoName source nonInteractive = do
       let repoUrl = if "https://" `isPrefixOf` repoName then repoName else "https://github.com/" ++ repoName
       liftIO $ putStrLn $ "📥 A clonar " ++ repoUrl ++ "..."
 
-      -- CORRIGIDO: Renomeado `stderr` para `cloneStderr` para evitar shadowing e usado `_` para stdout não utilizado.
       (exitCode, _, cloneStderr) <- liftIO $ readProcessWithExitCode "git" ["clone", repoUrl, source] ""
 
-      -- CORRIGIDO: O `case` agora é exaustivo, tratando o caso de falha.
       case exitCode of
         Exit.ExitSuccess -> do
           liftIO $ putStrLn $ color "32" "✅ Repositório clonado com sucesso!"
@@ -285,7 +283,6 @@ mainSync source = do
   unless sourceExists $ throwE $ Msg $ "O diretório source '" ++ source ++ "' não foi encontrado."
 
   liftIO $ putStrLn "🔍 A verificar o estado do repositório..."
-  -- CORRIGIDO: Renomeado `stdout` para evitar shadowing e `_` para stderr não utilizado.
   (exitCode, gitStatusOutput, _) <- liftIO $ readProcessWithExitCode "git" ["-C", source, "status", "--porcelain"] ""
 
   unless (exitCode == Exit.ExitSuccess) $ throwE $ GitCommandFailed "status --porcelain"

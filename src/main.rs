@@ -61,7 +61,6 @@ fn check_git_availability() -> Result<(), DotfilesError> {
 
 // --- Estruturas de Dados e Erros ---
 
-#[derive(Debug)]
 enum PlanAction {
     CreateLink { src: PathBuf, dest: PathBuf },
     SkipExists { src: PathBuf, dest: PathBuf },
@@ -146,6 +145,7 @@ enum Commands {
     },
 }
 
+// MUDANÇA 2: Pattern matching simplificado
 #[allow(clippy::needless_pass_by_value)]
 fn create_plan_recursive<'a>(
     src: PathBuf,
@@ -157,17 +157,37 @@ fn create_plan_recursive<'a>(
         return Box::new(std::iter::empty());
     }
     let new_visited = visited.update(src.clone());
-    if dest.exists() {
-        if let Ok(target) = fs::read_link(&dest) {
-            if target.starts_with(dotfiles_dir) && target == src {
-                Box::new(std::iter::once(PlanAction::SkipExists { src, dest }))
-            } else {
-                Box::new(std::iter::once(PlanAction::Conflict {
-                    dest,
-                    reason: "symlink existente aponta para outro local".to_string(),
-                }))
+
+    // Pattern matching simplificado com tuplas
+    match (dest.exists(), dest.is_symlink(), src.is_dir(), dest.is_dir()) {
+        // Destino não existe - criar link
+        (false, _, _, _) => {
+            Box::new(std::iter::once(PlanAction::CreateLink { src, dest }))
+        }
+        
+        // Destino existe e é symlink - verificar se aponta para o local correto
+        (true, true, _, _) => {
+            match fs::read_link(&dest) {
+                Ok(target) if target.starts_with(dotfiles_dir) && target == src => {
+                    Box::new(std::iter::once(PlanAction::SkipExists { src, dest }))
+                }
+                Ok(_) => {
+                    Box::new(std::iter::once(PlanAction::Conflict {
+                        dest,
+                        reason: "symlink existente aponta para outro local".to_string(),
+                    }))
+                }
+                Err(_) => {
+                    Box::new(std::iter::once(PlanAction::Conflict {
+                        dest,
+                        reason: "erro ao ler symlink existente".to_string(),
+                    }))
+                }
             }
-        } else if src.is_dir() && dest.is_dir() {
+        }
+        
+        // Ambos são diretórios - recursão
+        (true, false, true, true) => {
             let dir_iter = match fs::read_dir(&src) {
                 Ok(iter) => Box::new(iter.flatten()) as Box<dyn Iterator<Item = fs::DirEntry>>,
                 Err(e) => {
@@ -196,14 +216,15 @@ fn create_plan_recursive<'a>(
                         )
                     }),
             )
-        } else {
+        }
+        
+        // Qualquer outro caso - conflito
+        (true, false, _, _) => {
             Box::new(std::iter::once(PlanAction::Conflict {
                 dest,
                 reason: "já existe um ficheiro ou diretório no local".to_string(),
             }))
         }
-    } else {
-        Box::new(std::iter::once(PlanAction::CreateLink { src, dest }))
     }
 }
 
@@ -244,6 +265,7 @@ fn execute_plan(plan: Vec<PlanAction>, home_s: &str) -> Vec<ExecResult> {
         .collect()
 }
 
+// Pattern matching simplificado também na função unlink
 #[allow(clippy::needless_pass_by_value)]
 fn unlink_recursive<'a>(
     src: PathBuf,
@@ -251,56 +273,68 @@ fn unlink_recursive<'a>(
     dotfiles_dir: &'a Path,
     home_s: &'a str,
 ) -> Box<dyn Iterator<Item = String> + 'a> {
-    if !dest.exists() {
-        return Box::new(std::iter::empty());
-    }
-    if dest.is_symlink() {
-        if let Ok(target) = fs::read_link(&dest) {
-            if target.starts_with(dotfiles_dir) {
-                return match fs::remove_file(&dest) {
-                    Ok(()) => Box::new(std::iter::once(format!(
-                        "🗑️ Link removido: {}",
-                        pretty(&dest, home_s)
-                    ))),
-                    Err(e) => Box::new(std::iter::once(format!(
-                        "❌ Erro ao remover {}: {e}",
-                        pretty(&dest, home_s)
-                    ))),
-                };
+    match (dest.exists(), dest.is_symlink(), src.is_dir(), dest.is_dir()) {
+        // Destino não existe - nada a fazer
+        (false, _, _, _) => {
+            Box::new(std::iter::empty())
+        }
+        
+        // Destino é symlink - verificar se é gerenciado por nós
+        (true, true, _, _) => {
+            match fs::read_link(&dest) {
+                Ok(target) if target.starts_with(dotfiles_dir) => {
+                    match fs::remove_file(&dest) {
+                        Ok(()) => Box::new(std::iter::once(format!(
+                            "🗑️ Link removido: {}",
+                            pretty(&dest, home_s)
+                        ))),
+                        Err(e) => Box::new(std::iter::once(format!(
+                            "❌ Erro ao remover {}: {e}",
+                            pretty(&dest, home_s)
+                        ))),
+                    }
+                }
+                _ => Box::new(std::iter::empty()),
             }
         }
-    } else if src.is_dir() && dest.is_dir() {
-        let dir_iter = match fs::read_dir(&src) {
-            Ok(iter) => Box::new(iter.flatten()) as Box<dyn Iterator<Item = fs::DirEntry>>,
-            Err(e) => {
-                eprintln!(
-                    "{}",
-                    color(
-                        &format!(
-                            "Aviso: Não foi possível ler o diretório {}: {e}",
-                            src.display()
-                        ),
-                        "33"
-                    )
-                );
-                Box::new(std::iter::empty())
-            }
-        };
-        return Box::new(
-            dir_iter
-                .filter(|entry| !should_ignore(entry))
-                .flat_map(move |entry| {
-                    unlink_recursive(
-                        entry.path(),
-                        dest.join(entry.file_name()),
-                        dotfiles_dir,
-                        home_s,
-                    )
-                }),
-        );
+        
+        // Ambos são diretórios - recursão
+        (true, false, true, true) => {
+            let dir_iter = match fs::read_dir(&src) {
+                Ok(iter) => Box::new(iter.flatten()) as Box<dyn Iterator<Item = fs::DirEntry>>,
+                Err(e) => {
+                    eprintln!(
+                        "{}",
+                        color(
+                            &format!(
+                                "Aviso: Não foi possível ler o diretório {}: {e}",
+                                src.display()
+                            ),
+                            "33"
+                        )
+                    );
+                    Box::new(std::iter::empty())
+                }
+            };
+            Box::new(
+                dir_iter
+                    .filter(|entry| !should_ignore(entry))
+                    .flat_map(move |entry| {
+                        unlink_recursive(
+                            entry.path(),
+                            dest.join(entry.file_name()),
+                            dotfiles_dir,
+                            home_s,
+                        )
+                    }),
+            )
+        }
+        
+        // Qualquer outro caso - nada a fazer
+        _ => Box::new(std::iter::empty()),
     }
-    Box::new(std::iter::empty())
 }
+
 // --- Funções de Comando ---
 
 fn main_add(
@@ -519,7 +553,6 @@ fn main() {
     }
 }
 
-// Todo o código que estava em `main` e na closure `run` passa para aqui.
 fn run_app() -> Result<(), DotfilesError> {
     check_git_availability()?;
 

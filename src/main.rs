@@ -114,16 +114,62 @@ fn check_git_availability() -> Result<(), DotfilesError> {
     }
 }
 
-// --- Estruturas de Dados e Erros ---
+// --- MUDANÇA 6: Type Safety Melhorada ---
 
+// Enum para representar razões de conflito de forma type-safe
+#[derive(Debug, Clone, PartialEq)]
+enum ConflictReason {
+    SymlinkPointsElsewhere,
+    FileExistsAtDestination,
+    SymlinkReadError,
+}
+
+impl fmt::Display for ConflictReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SymlinkPointsElsewhere => write!(f, "{}", config::messages::SYMLINK_POINTS_ELSEWHERE),
+            Self::FileExistsAtDestination => write!(f, "{}", config::messages::FILE_EXISTS_AT_DESTINATION),
+            Self::SymlinkReadError => write!(f, "{}", config::messages::SYMLINK_READ_ERROR),
+        }
+    }
+}
+
+// Status de resultado com type safety
+#[derive(Debug, Clone, PartialEq)]
+enum ResultStatus {
+    Success,
+    Warning,
+    Error,
+}
+
+// Estruturas de dados com type safety melhorada
 enum PlanAction {
     CreateLink { src: PathBuf, dest: PathBuf },
     SkipExists { src: PathBuf, dest: PathBuf },
-    Conflict { dest: PathBuf, reason: String },
+    Conflict { dest: PathBuf, reason: ConflictReason }, // Agora type-safe!
 }
 
 struct ExecResult {
     message: String,
+    status: ResultStatus, // Type-safe status
+}
+
+impl ExecResult {
+    const fn new(message: String, status: ResultStatus) -> Self {
+        Self { message, status }
+    }
+
+    const fn success(message: String) -> Self {
+        Self::new(message, ResultStatus::Success)
+    }
+
+    const fn warning(message: String) -> Self {
+        Self::new(message, ResultStatus::Warning)
+    }
+
+    const fn error(message: String) -> Self {
+        Self::new(message, ResultStatus::Error)
+    }
 }
 
 #[derive(Debug)]
@@ -200,7 +246,7 @@ enum Commands {
     },
 }
 
-// MUDANÇA 2: Pattern matching simplificado
+// MUDANÇA 2 + 6: Pattern matching com type safety melhorada
 #[allow(clippy::needless_pass_by_value)]
 fn create_plan_recursive<'a>(
     src: PathBuf,
@@ -229,13 +275,13 @@ fn create_plan_recursive<'a>(
                 Ok(_) => {
                     Box::new(std::iter::once(PlanAction::Conflict {
                         dest,
-                        reason: config::messages::SYMLINK_POINTS_ELSEWHERE.to_string(),
+                        reason: ConflictReason::SymlinkPointsElsewhere,
                     }))
                 }
                 Err(_) => {
                     Box::new(std::iter::once(PlanAction::Conflict {
                         dest,
-                        reason: config::messages::SYMLINK_READ_ERROR.to_string(),
+                        reason: ConflictReason::SymlinkReadError,
                     }))
                 }
             }
@@ -277,7 +323,7 @@ fn create_plan_recursive<'a>(
         (true, false, _, _) => {
             Box::new(std::iter::once(PlanAction::Conflict {
                 dest,
-                reason: config::messages::FILE_EXISTS_AT_DESTINATION.to_string(),
+                reason: ConflictReason::FileExistsAtDestination,
             }))
         }
     }
@@ -291,40 +337,33 @@ fn execute_plan(plan: Vec<PlanAction>, home_s: &str) -> Vec<ExecResult> {
                     fs::create_dir_all(parent).ok();
                 }
                 match unix_fs::symlink(&src, &dest) {
-                    Ok(()) => ExecResult {
-                        message: format!(
-                            "{} Link criado: {} {} {}",
-                            config::symbols::SUCCESS,
-                            pretty(&dest, home_s),
-                            config::symbols::ARROW,
-                            pretty(&src, home_s)
-                        ),
-                    },
-                    Err(e) => ExecResult {
-                        message: format!(
-                            "{} Erro ao criar link para {}: {e}",
-                            config::symbols::ERROR,
-                            pretty(&dest, home_s)
-                        ),
-                    },
+                    Ok(()) => ExecResult::success(format!(
+                        "{} Link criado: {} {} {}",
+                        config::symbols::SUCCESS,
+                        pretty(&dest, home_s),
+                        config::symbols::ARROW,
+                        pretty(&src, home_s)
+                    )),
+                    Err(e) => ExecResult::error(format!(
+                        "{} Erro ao criar link para {}: {e}",
+                        config::symbols::ERROR,
+                        pretty(&dest, home_s)
+                    )),
                 }
             }
-            PlanAction::SkipExists { src, dest } => ExecResult {
-                message: format!(
-                    "{}  Link já existe: {} {} {}",
-                    config::symbols::WARNING,
-                    pretty(&dest, home_s),
-                    config::symbols::ARROW,
-                    pretty(&src, home_s)
-                ),
-            },
-            PlanAction::Conflict { dest, reason } => ExecResult {
-                message: format!(
-                    "{} Conflito: {} ({reason})", 
-                    config::symbols::ERROR,
-                    pretty(&dest, home_s)
-                ),
-            },
+            PlanAction::SkipExists { src, dest } => ExecResult::warning(format!(
+                "{}  Link já existe: {} {} {}",
+                config::symbols::WARNING,
+                pretty(&dest, home_s),
+                config::symbols::ARROW,
+                pretty(&src, home_s)
+            )),
+            PlanAction::Conflict { dest, reason } => ExecResult::error(format!(
+                "{} Conflito: {} ({})", 
+                config::symbols::ERROR,
+                pretty(&dest, home_s),
+                reason
+            )),
         })
         .collect()
 }
@@ -467,35 +506,27 @@ fn main_add(
     Ok(())
 }
 
-// Função pura para relatório - separada da lógica principal
+// Função pura para relatório com type safety
 fn display_execution_report(results: &[ExecResult]) {
     println!("\n{}", config::messages::OPERATION_REPORT);
     
-    // Lazy: conta usando iterator com checked arithmetic
+    // Type-safe counting usando o enum ResultStatus
     let (created_count, conflict_count, warning_count) = results
         .iter()
         .fold((0_usize, 0_usize, 0_usize), |(created, conflicts, warnings), result| {
-            if result.message.starts_with(config::symbols::SUCCESS) {
-                (created.saturating_add(1), conflicts, warnings)
-            } else if result.message.starts_with(config::symbols::ERROR) {
-                (created, conflicts.saturating_add(1), warnings)
-            } else if result.message.starts_with(config::symbols::WARNING) {
-                (created, conflicts, warnings.saturating_add(1))
-            } else {
-                (created, conflicts, warnings)
+            match result.status {
+                ResultStatus::Success => (created.saturating_add(1), conflicts, warnings),
+                ResultStatus::Error => (created, conflicts.saturating_add(1), warnings),
+                ResultStatus::Warning => (created, conflicts, warnings.saturating_add(1)),
             }
         });
 
-    // Correção: usar for loop em vez de for_each para side effects
+    // Type-safe display usando o enum ResultStatus
     for result in results {
-        let color_code = if result.message.starts_with(config::symbols::SUCCESS) {
-            config::colors::GREEN
-        } else if result.message.starts_with(config::symbols::WARNING) {
-            config::colors::YELLOW
-        } else if result.message.starts_with(config::symbols::ERROR) {
-            config::colors::RED
-        } else {
-            config::colors::WHITE
+        let color_code = match result.status {
+            ResultStatus::Success => config::colors::GREEN,
+            ResultStatus::Warning => config::colors::YELLOW,
+            ResultStatus::Error => config::colors::RED,
         };
         println!("{}", color(&result.message, color_code));
     }

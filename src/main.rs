@@ -11,10 +11,66 @@ use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+// --- MUDANÇA 4: Constantes Centralizadas ---
+mod config {
+    pub const ANSI_RESET: &str = "\x1b[0m";
+    pub const DOTFILES_DIR: &str = ".config/dotfiles";
+    pub const PROGRESS_TICK_RATE_MS: u64 = 100;
+    
+    pub const DEFAULT_IGNORE: &[&str] = &[".git", ".gitignore", "main.hook"];
+    
+    pub mod colors {
+        pub const RED: &str = "31";
+        pub const GREEN: &str = "32";
+        pub const YELLOW: &str = "33";
+        pub const BLUE: &str = "34";
+        pub const WHITE: &str = "37";
+    }
+    
+    pub mod messages {
+        pub const GIT_NOT_INSTALLED: &str = "O Git não parece estar instalado ou não está no seu PATH. \nPor favor, instale o Git para continuar.";
+        pub const HOME_NOT_FOUND: &str = "Não foi possível encontrar o diretório HOME.";
+        pub const DOTFILES_EXISTS: &str = "⚠️ O diretório de dotfiles já existe!";
+        pub const CLONE_SUCCESS: &str = "✅ Repositório clonado com sucesso!";
+        pub const SYNC_SUCCESS: &str = "🎉 Sincronização concluída com sucesso!";
+        pub const NO_CHANGES: &str = "✨ Sem alterações para sincronizar. Tudo atualizado!";
+        pub const NO_LINKS_TO_CREATE: &str = "✨ Nenhum link novo para criar ou conflito encontrado.";
+        pub const OPERATION_CANCELLED: &str = "🛑 Operação cancelada.";
+        pub const COMMIT_CANCELLED: &str = "🛑 Commit cancelado. Mensagem vazia.";
+        
+        pub const SYMLINK_POINTS_ELSEWHERE: &str = "symlink existente aponta para outro local";
+        pub const SYMLINK_READ_ERROR: &str = "erro ao ler symlink existente";
+        pub const FILE_EXISTS_AT_DESTINATION: &str = "já existe um ficheiro ou diretório no local";
+        
+        pub const ANALYZING_DOTFILES: &str = "🔍 A analisar dotfiles e a gerar plano de ações...";
+        pub const CHECKING_REPO_STATUS: &str = "🔍 A verificar o estado do repositório...";
+        pub const DETECTED_CHANGES: &str = "📦 Alterações detetadas:";
+        pub const AUTO_EXECUTING_ADD: &str = "🚀 A executar o comando 'add' automaticamente...";
+        pub const ADDING_TO_STAGE: &str = "⚡ A adicionar ficheiros ao stage...";
+        pub const PUSHING_TO_REMOTE: &str = "🚀 A enviar para o repositório remoto (push)...";
+        pub const CONTACTING_REMOTE: &str = "A contactar o repositório remoto...";
+        
+        pub const OPERATION_REPORT: &str = "--- Relatório da Operação ---";
+        pub const SUMMARY: &str = "--- Resumo ---";
+        pub const LINKS_TO_CREATE: &str = "Serão criados os seguintes links:";
+        
+        pub const PROMPT_APPLY_CHANGES: &str = "Deseja aplicar estas alterações?";
+        pub const PROMPT_COMMIT_MESSAGE: &str = "Mensagem do commit";
+    }
+    
+    pub mod symbols {
+        pub const SUCCESS: &str = "✅";
+        pub const WARNING: &str = "⚠️";
+        pub const ERROR: &str = "❌";
+        pub const TRASH: &str = "🗑️";
+        pub const ARROW: &str = "→";
+    }
+}
+
 // --- Funções Auxiliares ---
 
 fn color(text: &str, code: &str) -> String {
-    format!("\x1b[{code}m{text}\x1b[0m")
+    format!("\x1b[{code}m{text}{}", config::ANSI_RESET)
 }
 
 fn pretty(path: &Path, home_s: &str) -> String {
@@ -22,11 +78,10 @@ fn pretty(path: &Path, home_s: &str) -> String {
 }
 
 fn should_ignore(entry: &fs::DirEntry) -> bool {
-    const IGNORE_LIST: &[&str] = &[".git", ".gitignore", "main.hook"];
     entry
         .file_name()
         .to_str()
-        .is_some_and(|name| IGNORE_LIST.contains(&name))
+        .is_some_and(|name| config::DEFAULT_IGNORE.contains(&name))
 }
 
 fn build_base_git_command(source: &Path, args: &[&str]) -> Command {
@@ -85,10 +140,10 @@ enum DotfilesError {
 
 impl fmt::Display for DotfilesError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ", color("Erro:", "31"))?;
+        write!(f, "{} ", color("Erro:", config::colors::RED))?;
         match self {
-            Self::HomeDirNotFound => write!(f, "Não foi possível encontrar o diretório HOME."),
-            Self::GitNotInstalled => write!(f, "O Git não parece estar instalado ou não está no seu PATH. \nPor favor, instale o Git para continuar."),
+            Self::HomeDirNotFound => write!(f, "{}", config::messages::HOME_NOT_FOUND),
+            Self::GitNotInstalled => write!(f, "{}", config::messages::GIT_NOT_INSTALLED),
             Self::GitCloneFailed(s) => write!(f, "Falha ao clonar repositório: {s}"),
             Self::GitCommandFailed(s) => write!(f, "Comando Git falhou: {s}"),
             Self::IoError(e) => write!(f, "Operação de I/O falhou: {e}"),
@@ -145,18 +200,16 @@ enum Commands {
     },
 }
 
-// MUDANÇAS 2 e 3: Pattern matching simplificado + Tratamento de erros funcional
-type PlanResult<'a> = Result<Box<dyn Iterator<Item = PlanAction> + 'a>, DotfilesError>;
-
+// MUDANÇA 2: Pattern matching simplificado
 #[allow(clippy::needless_pass_by_value)]
 fn create_plan_recursive<'a>(
     src: PathBuf,
     dest: PathBuf,
     dotfiles_dir: &'a Path,
     visited: HashSet<PathBuf>,
-) -> PlanResult<'a> {
+) -> Box<dyn Iterator<Item = PlanAction> + 'a> {
     if visited.contains(&src) {
-        return Ok(Box::new(std::iter::empty()));
+        return Box::new(std::iter::empty());
     }
     let new_visited = visited.update(src.clone());
 
@@ -164,79 +217,70 @@ fn create_plan_recursive<'a>(
     match (dest.exists(), dest.is_symlink(), src.is_dir(), dest.is_dir()) {
         // Destino não existe - criar link
         (false, _, _, _) => {
-            Ok(Box::new(std::iter::once(PlanAction::CreateLink { src, dest })))
+            Box::new(std::iter::once(PlanAction::CreateLink { src, dest }))
         }
         
         // Destino existe e é symlink - verificar se aponta para o local correto
         (true, true, _, _) => {
-            handle_symlink_case(src, dest, dotfiles_dir)
+            match fs::read_link(&dest) {
+                Ok(target) if target.starts_with(dotfiles_dir) && target == src => {
+                    Box::new(std::iter::once(PlanAction::SkipExists { src, dest }))
+                }
+                Ok(_) => {
+                    Box::new(std::iter::once(PlanAction::Conflict {
+                        dest,
+                        reason: config::messages::SYMLINK_POINTS_ELSEWHERE.to_string(),
+                    }))
+                }
+                Err(_) => {
+                    Box::new(std::iter::once(PlanAction::Conflict {
+                        dest,
+                        reason: config::messages::SYMLINK_READ_ERROR.to_string(),
+                    }))
+                }
+            }
         }
         
         // Ambos são diretórios - recursão
         (true, false, true, true) => {
-            handle_directory_case(src, dest, dotfiles_dir, new_visited)
-        }
-        
-        // Qualquer outro caso - conflito
-        (true, false, _, _) => {
-            Ok(Box::new(std::iter::once(PlanAction::Conflict {
-                dest,
-                reason: "já existe um ficheiro ou diretório no local".to_string(),
-            })))
-        }
-    }
-}
-
-// Tratamento funcional de symlinks sem side effects
-fn handle_symlink_case<'a>(
-    src: PathBuf,
-    dest: PathBuf,
-    dotfiles_dir: &Path,
-) -> PlanResult<'a> {
-    fs::read_link(&dest)
-        .map(|target| {
-            if target.starts_with(dotfiles_dir) && target == src {
-                PlanAction::SkipExists { src, dest }
-            } else {
-                PlanAction::Conflict {
-                    dest,
-                    reason: "symlink existente aponta para outro local".to_string(),
+            let dir_iter = match fs::read_dir(&src) {
+                Ok(iter) => Box::new(iter.flatten()) as Box<dyn Iterator<Item = fs::DirEntry>>,
+                Err(e) => {
+                    eprintln!(
+                        "{}",
+                        color(
+                            &format!(
+                                "Aviso: Não foi possível ler o diretório {}: {e}",
+                                src.display()
+                            ),
+                            config::colors::YELLOW
+                        )
+                    );
+                    Box::new(std::iter::empty())
                 }
-            }
-        })
-        .or_else(|_| Ok(PlanAction::Conflict {
-            dest,
-            reason: "erro ao ler symlink existente".to_string(),
-        }))
-        .map(|action| Box::new(std::iter::once(action)) as Box<dyn Iterator<Item = PlanAction>>)
-        .map_err(DotfilesError::from)
-}
-
-// Tratamento funcional de diretórios, retornando Result
-fn handle_directory_case<'a>(
-    src: PathBuf,
-    dest: PathBuf,
-    dotfiles_dir: &'a Path,
-    visited: HashSet<PathBuf>,
-) -> PlanResult<'a> {
-    fs::read_dir(&src)
-        .map_err(DotfilesError::from)
-        .map(|entries| {
+            };
             Box::new(
-                entries
-                    .filter_map(|entry| entry.ok())
+                dir_iter
                     .filter(|entry| !should_ignore(entry))
-                    .filter_map(move |entry| {
+                    .flat_map(move |entry| {
                         create_plan_recursive(
                             entry.path(),
                             dest.join(entry.file_name()),
                             dotfiles_dir,
-                            visited.clone(),
-                        ).ok() // Converte Result em Option, ignorando erros internos
-                    })
-                    .flatten(),
-            ) as Box<dyn Iterator<Item = PlanAction>>
-        })
+                            new_visited.clone(),
+                        )
+                    }),
+            )
+        }
+        
+        // Qualquer outro caso - conflito
+        (true, false, _, _) => {
+            Box::new(std::iter::once(PlanAction::Conflict {
+                dest,
+                reason: config::messages::FILE_EXISTS_AT_DESTINATION.to_string(),
+            }))
+        }
+    }
 }
 
 fn execute_plan(plan: Vec<PlanAction>, home_s: &str) -> Vec<ExecResult> {
@@ -249,14 +293,17 @@ fn execute_plan(plan: Vec<PlanAction>, home_s: &str) -> Vec<ExecResult> {
                 match unix_fs::symlink(&src, &dest) {
                     Ok(()) => ExecResult {
                         message: format!(
-                            "✅ Link criado: {} → {}",
+                            "{} Link criado: {} {} {}",
+                            config::symbols::SUCCESS,
                             pretty(&dest, home_s),
+                            config::symbols::ARROW,
                             pretty(&src, home_s)
                         ),
                     },
                     Err(e) => ExecResult {
                         message: format!(
-                            "❌ Erro ao criar link para {}: {e}",
+                            "{} Erro ao criar link para {}: {e}",
+                            config::symbols::ERROR,
                             pretty(&dest, home_s)
                         ),
                     },
@@ -264,98 +311,94 @@ fn execute_plan(plan: Vec<PlanAction>, home_s: &str) -> Vec<ExecResult> {
             }
             PlanAction::SkipExists { src, dest } => ExecResult {
                 message: format!(
-                    "⚠️  Link já existe: {} → {}",
+                    "{}  Link já existe: {} {} {}",
+                    config::symbols::WARNING,
                     pretty(&dest, home_s),
+                    config::symbols::ARROW,
                     pretty(&src, home_s)
                 ),
             },
             PlanAction::Conflict { dest, reason } => ExecResult {
-                message: format!("❌ Conflito: {} ({reason})", pretty(&dest, home_s)),
+                message: format!(
+                    "{} Conflito: {} ({reason})", 
+                    config::symbols::ERROR,
+                    pretty(&dest, home_s)
+                ),
             },
         })
         .collect()
 }
 
-// Pattern matching simplificado também na função unlink com tratamento funcional
-type UnlinkResult<'a> = Result<Box<dyn Iterator<Item = String> + 'a>, DotfilesError>;
-
+// Pattern matching simplificado também na função unlink
 #[allow(clippy::needless_pass_by_value)]
 fn unlink_recursive<'a>(
     src: PathBuf,
     dest: PathBuf,
     dotfiles_dir: &'a Path,
     home_s: &'a str,
-) -> UnlinkResult<'a> {
+) -> Box<dyn Iterator<Item = String> + 'a> {
     match (dest.exists(), dest.is_symlink(), src.is_dir(), dest.is_dir()) {
         // Destino não existe - nada a fazer
         (false, _, _, _) => {
-            Ok(Box::new(std::iter::empty()))
+            Box::new(std::iter::empty())
         }
         
         // Destino é symlink - verificar se é gerenciado por nós
         (true, true, _, _) => {
-            handle_unlink_symlink(dest, dotfiles_dir, home_s)
+            match fs::read_link(&dest) {
+                Ok(target) if target.starts_with(dotfiles_dir) => {
+                    match fs::remove_file(&dest) {
+                        Ok(()) => Box::new(std::iter::once(format!(
+                            "{} Link removido: {}",
+                            config::symbols::TRASH,
+                            pretty(&dest, home_s)
+                        ))),
+                        Err(e) => Box::new(std::iter::once(format!(
+                            "{} Erro ao remover {}: {e}",
+                            config::symbols::ERROR,
+                            pretty(&dest, home_s)
+                        ))),
+                    }
+                }
+                _ => Box::new(std::iter::empty()),
+            }
         }
         
         // Ambos são diretórios - recursão
         (true, false, true, true) => {
-            handle_unlink_directory(src, dest, dotfiles_dir, home_s)
-        }
-        
-        // Qualquer outro caso - nada a fazer
-        _ => Ok(Box::new(std::iter::empty())),
-    }
-}
-
-// Tratamento funcional de remoção de symlink
-fn handle_unlink_symlink<'a>(
-    dest: PathBuf,
-    dotfiles_dir: &Path,
-    home_s: &str,
-) -> UnlinkResult<'a> {
-    fs::read_link(&dest)
-        .map_err(DotfilesError::from)
-        .and_then(|target| {
-            if target.starts_with(dotfiles_dir) {
-                fs::remove_file(&dest)
-                    .map(|_| format!("🗑️ Link removido: {}", pretty(&dest, home_s)))
-                    .or_else(|e| Ok(format!("❌ Erro ao remover {}: {e}", pretty(&dest, home_s))))
-                    .map(|message| Some(message))
-            } else {
-                Ok(None)
-            }
-        })
-        .or_else(|_| Ok(None)) // Se não conseguir ler o link, ignora silenciosamente
-        .map(|opt_message| {
-            Box::new(opt_message.into_iter()) as Box<dyn Iterator<Item = String>>
-        })
-}
-
-// Tratamento funcional de remoção de diretório
-fn handle_unlink_directory<'a>(
-    src: PathBuf,
-    dest: PathBuf,
-    dotfiles_dir: &'a Path,
-    home_s: &'a str,
-) -> UnlinkResult<'a> {
-    fs::read_dir(&src)
-        .map_err(DotfilesError::from)
-        .map(|entries| {
+            let dir_iter = match fs::read_dir(&src) {
+                Ok(iter) => Box::new(iter.flatten()) as Box<dyn Iterator<Item = fs::DirEntry>>,
+                Err(e) => {
+                    eprintln!(
+                        "{}",
+                        color(
+                            &format!(
+                                "Aviso: Não foi possível ler o diretório {}: {e}",
+                                src.display()
+                            ),
+                            config::colors::YELLOW
+                        )
+                    );
+                    Box::new(std::iter::empty())
+                }
+            };
             Box::new(
-                entries
-                    .filter_map(|entry| entry.ok())
+                dir_iter
                     .filter(|entry| !should_ignore(entry))
-                    .filter_map(move |entry| {
+                    .flat_map(move |entry| {
                         unlink_recursive(
                             entry.path(),
                             dest.join(entry.file_name()),
                             dotfiles_dir,
                             home_s,
-                        ).ok() // Converte Result em Option, ignorando erros internos
-                    })
-                    .flatten(),
-            ) as Box<dyn Iterator<Item = String>>
-        })
+                        )
+                    }),
+            )
+        }
+        
+        // Qualquer outro caso - nada a fazer
+        _ => Box::new(std::iter::empty()),
+    }
 }
 
 // --- Funções de Comando ---
@@ -366,13 +409,12 @@ fn main_add(
     home_s: &str,
     non_interactive: bool,
 ) -> Result<(), DotfilesError> {
-    println!("🔍 A analisar dotfiles e a gerar plano de ações...");
+    println!("{}", config::messages::ANALYZING_DOTFILES);
 
-    // Tratamento funcional de erros - propaga erros em vez de usar eprintln!
     let plan: Vec<PlanAction> = fs::read_dir(source)?
-        .filter_map(|entry| entry.ok())
+        .flatten()
         .filter(|entry| !should_ignore(entry))
-        .map(|entry| {
+        .flat_map(|entry| {
             create_plan_recursive(
                 entry.path(),
                 home.join(entry.file_name()),
@@ -380,9 +422,6 @@ fn main_add(
                 HashSet::new(),
             )
         })
-        .collect::<Result<Vec<_>, _>>()? // Propaga erros funcionalmente
-        .into_iter()
-        .flatten()
         .collect();
 
     let to_create: Vec<_> = plan
@@ -391,14 +430,15 @@ fn main_add(
         .collect();
 
     if to_create.is_empty() {
-        println!("✨ Nenhum link novo para criar ou conflito encontrado.");
+        println!("{}", config::messages::NO_LINKS_TO_CREATE);
     } else {
-        println!("\nSerão criados os seguintes links:");
+        println!("\n{}:", config::messages::LINKS_TO_CREATE);
         for action in &to_create {
             if let PlanAction::CreateLink { src, dest } = action {
                 println!(
-                    "  {} → {}",
-                    color(&pretty(dest, home_s), "32"),
+                    "  {} {} {}",
+                    color(&pretty(dest, home_s), config::colors::GREEN),
+                    config::symbols::ARROW,
                     pretty(src, home_s)
                 );
             }
@@ -406,45 +446,45 @@ fn main_add(
         println!();
         if !non_interactive
             && !Confirm::with_theme(&SimpleTheme)
-                .with_prompt(color("Deseja aplicar estas alterações?", "37"))
+                .with_prompt(color(config::messages::PROMPT_APPLY_CHANGES, config::colors::WHITE))
                 .default(true)
                 .interact()?
         {
-            println!("  🛑 Operação cancelada.");
+            println!("  {}", config::messages::OPERATION_CANCELLED);
             return Ok(());
         }
     }
 
     let results = execute_plan(plan, home_s);
-    println!("\n--- Relatório da Operação ---");
+    println!("\n{}", config::messages::OPERATION_REPORT);
     let created_count = results
         .iter()
-        .filter(|r| r.message.starts_with("✅"))
+        .filter(|r| r.message.starts_with(config::symbols::SUCCESS))
         .count();
     let conflict_count = results
         .iter()
-        .filter(|r| r.message.starts_with("❌"))
+        .filter(|r| r.message.starts_with(config::symbols::ERROR))
         .count();
 
     for r in &results {
-        if r.message.starts_with("✅") {
-            println!("{}", color(&r.message, "32"));
-        } else if r.message.starts_with("⚠️") {
-            println!("{}", color(&r.message, "33"));
-        } else if r.message.starts_with("❌") {
-            println!("{}", color(&r.message, "31"));
+        if r.message.starts_with(config::symbols::SUCCESS) {
+            println!("{}", color(&r.message, config::colors::GREEN));
+        } else if r.message.starts_with(config::symbols::WARNING) {
+            println!("{}", color(&r.message, config::colors::YELLOW));
+        } else if r.message.starts_with(config::symbols::ERROR) {
+            println!("{}", color(&r.message, config::colors::RED));
         }
     }
 
     if created_count > 0 || conflict_count > 0 {
-        println!("{}", color("\n--- Resumo ---", "34"));
+        println!("{}", color(&format!("\n{}", config::messages::SUMMARY), config::colors::BLUE));
         println!(
             "{}",
-            color(&format!("  Links criados: {created_count}"), "32")
+            color(&format!("  Links criados: {created_count}"), config::colors::GREEN)
         );
         println!(
             "{}",
-            color(&format!("  Conflitos encontrados: {conflict_count}"), "31")
+            color(&format!("  Conflitos encontrados: {conflict_count}"), config::colors::RED)
         );
     }
 
@@ -452,31 +492,19 @@ fn main_add(
 }
 
 fn main_del(source: &Path, home: &Path, home_s: &str) -> Result<(), DotfilesError> {
-    // Tratamento funcional - coleta erros e os propaga
-    let results: Result<Vec<_>, _> = fs::read_dir(source)?
-        .filter_map(|entry| entry.ok())
+    fs::read_dir(source)?
+        .flatten()
         .filter(|entry| !should_ignore(entry))
-        .map(|entry| {
+        .flat_map(|entry| {
             unlink_recursive(entry.path(), home.join(entry.file_name()), source, home_s)
         })
-        .collect();
-
-    // Se houver erro crítico, propaga; senão mostra resultados
-    match results {
-        Ok(iter_results) => {
-            iter_results
-                .into_iter()
-                .flatten()
-                .for_each(|message| println!("{}", color(&message, "33")));
-            Ok(())
-        }
-        Err(e) => Err(e),
-    }
+        .for_each(|r| println!("{}", color(&r, config::colors::YELLOW)));
+    Ok(())
 }
 
 fn get_dotfiles(repo: &str, source: &Path, non_interactive: bool) -> Result<(), DotfilesError> {
     if source.exists() && fs::read_dir(source)?.next().is_some() {
-        println!("{}", color("  ⚠️ O diretório de dotfiles já existe!", "33"));
+        println!("  {}", color(config::messages::DOTFILES_EXISTS, config::colors::YELLOW));
         return Ok(());
     }
     fs::create_dir_all(source)?;
@@ -491,8 +519,8 @@ fn get_dotfiles(repo: &str, source: &Path, non_interactive: bool) -> Result<(), 
 
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(ProgressStyle::default_spinner().template("{spinner:.cyan} {msg}")?);
-    spinner.set_message("A contactar o repositório remoto...");
-    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+    spinner.set_message(config::messages::CONTACTING_REMOTE);
+    spinner.enable_steady_tick(std::time::Duration::from_millis(config::PROGRESS_TICK_RATE_MS));
 
     let output = Command::new("git")
         .arg("clone")
@@ -504,8 +532,8 @@ fn get_dotfiles(repo: &str, source: &Path, non_interactive: bool) -> Result<(), 
     spinner.finish_and_clear();
 
     if output.status.success() {
-        println!("{}", color("✅ Repositório clonado com sucesso!", "32"));
-        println!("\n🚀 A executar o comando 'add' automaticamente...");
+        println!("{}", color(config::messages::CLONE_SUCCESS, config::colors::GREEN));
+        println!("\n{}", config::messages::AUTO_EXECUTING_ADD);
         let home = dirs::home_dir().ok_or(DotfilesError::HomeDirNotFound)?;
         let home_s = home.to_string_lossy();
         main_add(source, &home, &home_s, non_interactive)?;
@@ -524,7 +552,7 @@ fn main_sync(source: &Path) -> Result<(), DotfilesError> {
         )));
     }
 
-    println!("🔍 A verificar o estado do repositório...");
+    println!("{}", config::messages::CHECKING_REPO_STATUS);
 
     let status_output = Command::new("git")
         .current_dir(source)
@@ -539,45 +567,45 @@ fn main_sync(source: &Path) -> Result<(), DotfilesError> {
     if status_output.stdout.is_empty() {
         println!(
             "{}",
-            color("✨ Sem alterações para sincronizar. Tudo atualizado!", "32")
+            color(config::messages::NO_CHANGES, config::colors::GREEN)
         );
         return Ok(());
     }
 
-    println!("{}", color("📦 Alterações detetadas:", "33"));
+    println!("{}", color(config::messages::DETECTED_CHANGES, config::colors::YELLOW));
     run_git_command(source, &["status", "-s"], true)?;
     println!();
 
     let message: String = Input::with_theme(&SimpleTheme)
-        .with_prompt(color("Mensagem do commit", "37"))
+        .with_prompt(color(config::messages::PROMPT_COMMIT_MESSAGE, config::colors::WHITE))
         .interact_text()?;
 
     if message.trim().is_empty() {
-        println!("  🛑 Commit cancelado. Mensagem vazia.");
+        println!("  {}", config::messages::COMMIT_CANCELLED);
         return Ok(());
     }
 
-    println!("{}", color("⚡ A adicionar ficheiros ao stage...", "34"));
+    println!("{}", color(config::messages::ADDING_TO_STAGE, config::colors::BLUE));
     run_git_command(source, &["add", "."], false)?;
 
     println!(
         "{}",
         color(
             &format!("📝 A fazer commit com a mensagem: \"{message}\""),
-            "34"
+            config::colors::BLUE
         )
     );
     run_git_command(source, &["commit", "-m", &message], false)?;
 
     println!(
         "{}",
-        color("🚀 A enviar para o repositório remoto (push)...", "34")
+        color(config::messages::PUSHING_TO_REMOTE, config::colors::BLUE)
     );
     run_git_command(source, &["push"], true)?;
 
     println!(
         "\n{}",
-        color("🎉 Sincronização concluída com sucesso!", "32")
+        color(config::messages::SYNC_SUCCESS, config::colors::GREEN)
     );
 
     Ok(())
@@ -601,7 +629,7 @@ fn run_app() -> Result<(), DotfilesError> {
 
     let cli = Cli::parse();
     let home_s = home.to_string_lossy();
-    let source = home.join(".config/dotfiles");
+    let source = home.join(config::DOTFILES_DIR);
 
     match cli.command {
         Some(Commands::Add) => main_add(&source, &home, &home_s, cli.yes),

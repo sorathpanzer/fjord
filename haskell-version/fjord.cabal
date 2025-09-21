@@ -10,10 +10,23 @@ build-type:         Simple
 extra-doc-files:    CHANGELOG.md
 
 common warnings
-    ghc-options: -Wall -Wextra -Wmissing-signatures -Wunused-top-binds -Wname-shadowing -Wincomplete-patterns
+    ghc-options:
+        -Wall
+        -Wextra
+        -Wmissing-signatures
+        -Wunused-top-binds
+        -Wname-shadowing
+        -Wincomplete-patterns
+        -Werror
+
+common secure
+    ghc-options:
+        -Werror=trustworthy-safe
+    --  -Werror=unsafe
+    -- default-extensions: Safe
 
 executable fjord
-    import:           warnings
+    import:           warnings, secure
     main-is:          Main.hs
     hs-source-dirs:   app
     default-language: GHC2021

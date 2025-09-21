@@ -145,18 +145,16 @@ enum Commands {
     },
 }
 
-// MUDANÇAS 2 e 3: Pattern matching simplificado + Tratamento de erros funcional
-type PlanResult<'a> = Result<Box<dyn Iterator<Item = PlanAction> + 'a>, DotfilesError>;
-
+// MUDANÇA 2: Pattern matching simplificado
 #[allow(clippy::needless_pass_by_value)]
 fn create_plan_recursive<'a>(
     src: PathBuf,
     dest: PathBuf,
     dotfiles_dir: &'a Path,
     visited: HashSet<PathBuf>,
-) -> PlanResult<'a> {
+) -> Box<dyn Iterator<Item = PlanAction> + 'a> {
     if visited.contains(&src) {
-        return Ok(Box::new(std::iter::empty()));
+        return Box::new(std::iter::empty());
     }
     let new_visited = visited.update(src.clone());
 
@@ -164,79 +162,70 @@ fn create_plan_recursive<'a>(
     match (dest.exists(), dest.is_symlink(), src.is_dir(), dest.is_dir()) {
         // Destino não existe - criar link
         (false, _, _, _) => {
-            Ok(Box::new(std::iter::once(PlanAction::CreateLink { src, dest })))
+            Box::new(std::iter::once(PlanAction::CreateLink { src, dest }))
         }
         
         // Destino existe e é symlink - verificar se aponta para o local correto
         (true, true, _, _) => {
-            handle_symlink_case(src, dest, dotfiles_dir)
+            match fs::read_link(&dest) {
+                Ok(target) if target.starts_with(dotfiles_dir) && target == src => {
+                    Box::new(std::iter::once(PlanAction::SkipExists { src, dest }))
+                }
+                Ok(_) => {
+                    Box::new(std::iter::once(PlanAction::Conflict {
+                        dest,
+                        reason: "symlink existente aponta para outro local".to_string(),
+                    }))
+                }
+                Err(_) => {
+                    Box::new(std::iter::once(PlanAction::Conflict {
+                        dest,
+                        reason: "erro ao ler symlink existente".to_string(),
+                    }))
+                }
+            }
         }
         
         // Ambos são diretórios - recursão
         (true, false, true, true) => {
-            handle_directory_case(src, dest, dotfiles_dir, new_visited)
-        }
-        
-        // Qualquer outro caso - conflito
-        (true, false, _, _) => {
-            Ok(Box::new(std::iter::once(PlanAction::Conflict {
-                dest,
-                reason: "já existe um ficheiro ou diretório no local".to_string(),
-            })))
-        }
-    }
-}
-
-// Tratamento funcional de symlinks sem side effects
-fn handle_symlink_case<'a>(
-    src: PathBuf,
-    dest: PathBuf,
-    dotfiles_dir: &Path,
-) -> PlanResult<'a> {
-    fs::read_link(&dest)
-        .map(|target| {
-            if target.starts_with(dotfiles_dir) && target == src {
-                PlanAction::SkipExists { src, dest }
-            } else {
-                PlanAction::Conflict {
-                    dest,
-                    reason: "symlink existente aponta para outro local".to_string(),
+            let dir_iter = match fs::read_dir(&src) {
+                Ok(iter) => Box::new(iter.flatten()) as Box<dyn Iterator<Item = fs::DirEntry>>,
+                Err(e) => {
+                    eprintln!(
+                        "{}",
+                        color(
+                            &format!(
+                                "Aviso: Não foi possível ler o diretório {}: {e}",
+                                src.display()
+                            ),
+                            "33"
+                        )
+                    );
+                    Box::new(std::iter::empty())
                 }
-            }
-        })
-        .or_else(|_| Ok(PlanAction::Conflict {
-            dest,
-            reason: "erro ao ler symlink existente".to_string(),
-        }))
-        .map(|action| Box::new(std::iter::once(action)) as Box<dyn Iterator<Item = PlanAction>>)
-        .map_err(DotfilesError::from)
-}
-
-// Tratamento funcional de diretórios, retornando Result
-fn handle_directory_case<'a>(
-    src: PathBuf,
-    dest: PathBuf,
-    dotfiles_dir: &'a Path,
-    visited: HashSet<PathBuf>,
-) -> PlanResult<'a> {
-    fs::read_dir(&src)
-        .map_err(DotfilesError::from)
-        .map(|entries| {
+            };
             Box::new(
-                entries
-                    .filter_map(|entry| entry.ok())
+                dir_iter
                     .filter(|entry| !should_ignore(entry))
-                    .filter_map(move |entry| {
+                    .flat_map(move |entry| {
                         create_plan_recursive(
                             entry.path(),
                             dest.join(entry.file_name()),
                             dotfiles_dir,
-                            visited.clone(),
-                        ).ok() // Converte Result em Option, ignorando erros internos
-                    })
-                    .flatten(),
-            ) as Box<dyn Iterator<Item = PlanAction>>
-        })
+                            new_visited.clone(),
+                        )
+                    }),
+            )
+        }
+        
+        // Qualquer outro caso - conflito
+        (true, false, _, _) => {
+            Box::new(std::iter::once(PlanAction::Conflict {
+                dest,
+                reason: "já existe um ficheiro ou diretório no local".to_string(),
+            }))
+        }
+    }
 }
 
 fn execute_plan(plan: Vec<PlanAction>, home_s: &str) -> Vec<ExecResult> {
@@ -276,86 +265,74 @@ fn execute_plan(plan: Vec<PlanAction>, home_s: &str) -> Vec<ExecResult> {
         .collect()
 }
 
-// Pattern matching simplificado também na função unlink com tratamento funcional
-type UnlinkResult<'a> = Result<Box<dyn Iterator<Item = String> + 'a>, DotfilesError>;
-
+// Pattern matching simplificado também na função unlink
 #[allow(clippy::needless_pass_by_value)]
 fn unlink_recursive<'a>(
     src: PathBuf,
     dest: PathBuf,
     dotfiles_dir: &'a Path,
     home_s: &'a str,
-) -> UnlinkResult<'a> {
+) -> Box<dyn Iterator<Item = String> + 'a> {
     match (dest.exists(), dest.is_symlink(), src.is_dir(), dest.is_dir()) {
         // Destino não existe - nada a fazer
         (false, _, _, _) => {
-            Ok(Box::new(std::iter::empty()))
+            Box::new(std::iter::empty())
         }
         
         // Destino é symlink - verificar se é gerenciado por nós
         (true, true, _, _) => {
-            handle_unlink_symlink(dest, dotfiles_dir, home_s)
+            match fs::read_link(&dest) {
+                Ok(target) if target.starts_with(dotfiles_dir) => {
+                    match fs::remove_file(&dest) {
+                        Ok(()) => Box::new(std::iter::once(format!(
+                            "🗑️ Link removido: {}",
+                            pretty(&dest, home_s)
+                        ))),
+                        Err(e) => Box::new(std::iter::once(format!(
+                            "❌ Erro ao remover {}: {e}",
+                            pretty(&dest, home_s)
+                        ))),
+                    }
+                }
+                _ => Box::new(std::iter::empty()),
+            }
         }
         
         // Ambos são diretórios - recursão
         (true, false, true, true) => {
-            handle_unlink_directory(src, dest, dotfiles_dir, home_s)
-        }
-        
-        // Qualquer outro caso - nada a fazer
-        _ => Ok(Box::new(std::iter::empty())),
-    }
-}
-
-// Tratamento funcional de remoção de symlink
-fn handle_unlink_symlink<'a>(
-    dest: PathBuf,
-    dotfiles_dir: &Path,
-    home_s: &str,
-) -> UnlinkResult<'a> {
-    fs::read_link(&dest)
-        .map_err(DotfilesError::from)
-        .and_then(|target| {
-            if target.starts_with(dotfiles_dir) {
-                fs::remove_file(&dest)
-                    .map(|_| format!("🗑️ Link removido: {}", pretty(&dest, home_s)))
-                    .or_else(|e| Ok(format!("❌ Erro ao remover {}: {e}", pretty(&dest, home_s))))
-                    .map(|message| Some(message))
-            } else {
-                Ok(None)
-            }
-        })
-        .or_else(|_| Ok(None)) // Se não conseguir ler o link, ignora silenciosamente
-        .map(|opt_message| {
-            Box::new(opt_message.into_iter()) as Box<dyn Iterator<Item = String>>
-        })
-}
-
-// Tratamento funcional de remoção de diretório
-fn handle_unlink_directory<'a>(
-    src: PathBuf,
-    dest: PathBuf,
-    dotfiles_dir: &'a Path,
-    home_s: &'a str,
-) -> UnlinkResult<'a> {
-    fs::read_dir(&src)
-        .map_err(DotfilesError::from)
-        .map(|entries| {
+            let dir_iter = match fs::read_dir(&src) {
+                Ok(iter) => Box::new(iter.flatten()) as Box<dyn Iterator<Item = fs::DirEntry>>,
+                Err(e) => {
+                    eprintln!(
+                        "{}",
+                        color(
+                            &format!(
+                                "Aviso: Não foi possível ler o diretório {}: {e}",
+                                src.display()
+                            ),
+                            "33"
+                        )
+                    );
+                    Box::new(std::iter::empty())
+                }
+            };
             Box::new(
-                entries
-                    .filter_map(|entry| entry.ok())
+                dir_iter
                     .filter(|entry| !should_ignore(entry))
-                    .filter_map(move |entry| {
+                    .flat_map(move |entry| {
                         unlink_recursive(
                             entry.path(),
                             dest.join(entry.file_name()),
                             dotfiles_dir,
                             home_s,
-                        ).ok() // Converte Result em Option, ignorando erros internos
-                    })
-                    .flatten(),
-            ) as Box<dyn Iterator<Item = String>>
-        })
+                        )
+                    }),
+            )
+        }
+        
+        // Qualquer outro caso - nada a fazer
+        _ => Box::new(std::iter::empty()),
+    }
 }
 
 // --- Funções de Comando ---
@@ -368,11 +345,10 @@ fn main_add(
 ) -> Result<(), DotfilesError> {
     println!("🔍 A analisar dotfiles e a gerar plano de ações...");
 
-    // Tratamento funcional de erros - propaga erros em vez de usar eprintln!
     let plan: Vec<PlanAction> = fs::read_dir(source)?
-        .filter_map(|entry| entry.ok())
+        .flatten()
         .filter(|entry| !should_ignore(entry))
-        .map(|entry| {
+        .flat_map(|entry| {
             create_plan_recursive(
                 entry.path(),
                 home.join(entry.file_name()),
@@ -380,9 +356,6 @@ fn main_add(
                 HashSet::new(),
             )
         })
-        .collect::<Result<Vec<_>, _>>()? // Propaga erros funcionalmente
-        .into_iter()
-        .flatten()
         .collect();
 
     let to_create: Vec<_> = plan
@@ -452,26 +425,14 @@ fn main_add(
 }
 
 fn main_del(source: &Path, home: &Path, home_s: &str) -> Result<(), DotfilesError> {
-    // Tratamento funcional - coleta erros e os propaga
-    let results: Result<Vec<_>, _> = fs::read_dir(source)?
-        .filter_map(|entry| entry.ok())
+    fs::read_dir(source)?
+        .flatten()
         .filter(|entry| !should_ignore(entry))
-        .map(|entry| {
+        .flat_map(|entry| {
             unlink_recursive(entry.path(), home.join(entry.file_name()), source, home_s)
         })
-        .collect();
-
-    // Se houver erro crítico, propaga; senão mostra resultados
-    match results {
-        Ok(iter_results) => {
-            iter_results
-                .into_iter()
-                .flatten()
-                .for_each(|message| println!("{}", color(&message, "33")));
-            Ok(())
-        }
-        Err(e) => Err(e),
-    }
+        .for_each(|r| println!("{}", color(&r, "33")));
+    Ok(())
 }
 
 fn get_dotfiles(repo: &str, source: &Path, non_interactive: bool) -> Result<(), DotfilesError> {

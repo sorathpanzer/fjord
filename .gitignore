@@ -2,3 +2,4 @@
 Cargo.lock
 fjord
 .git-credentials
+haskell-version/dist-newstyle

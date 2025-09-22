@@ -11,7 +11,6 @@ use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-// --- MUDANÇA 4: Constantes Centralizadas ---
 mod config {
     pub const ANSI_RESET: &str = "\x1b[0m";
     pub const DOTFILES_DIR: &str = ".config/dotfiles";
@@ -114,8 +113,6 @@ fn check_git_availability() -> Result<(), DotfilesError> {
     }
 }
 
-// --- MUDANÇA 6: Type Safety Melhorada ---
-
 // Enum para representar razões de conflito de forma type-safe
 #[derive(Debug, Clone, PartialEq)]
 enum ConflictReason {
@@ -142,7 +139,6 @@ enum ResultStatus {
     Error,
 }
 
-// Estruturas de dados com type safety melhorada
 enum PlanAction {
     CreateLink { src: PathBuf, dest: PathBuf },
     SkipExists { src: PathBuf, dest: PathBuf },
@@ -246,7 +242,6 @@ enum Commands {
     },
 }
 
-// MUDANÇA 2 + 6: Pattern matching com type safety melhorada
 #[allow(clippy::needless_pass_by_value)]
 fn create_plan_recursive<'a>(
     src: PathBuf,
@@ -259,7 +254,6 @@ fn create_plan_recursive<'a>(
     }
     let new_visited = visited.update(src.clone());
 
-    // Pattern matching simplificado com tuplas
     match (dest.exists(), dest.is_symlink(), src.is_dir(), dest.is_dir()) {
         // Destino não existe - criar link
         (false, _, _, _) => {
@@ -329,46 +323,6 @@ fn create_plan_recursive<'a>(
     }
 }
 
-fn execute_plan(plan: Vec<PlanAction>, home_s: &str) -> Vec<ExecResult> {
-    plan.into_iter()
-        .map(|action| match action {
-            PlanAction::CreateLink { src, dest } => {
-                if let Some(parent) = dest.parent() {
-                    fs::create_dir_all(parent).ok();
-                }
-                match unix_fs::symlink(&src, &dest) {
-                    Ok(()) => ExecResult::success(format!(
-                        "{} Link criado: {} {} {}",
-                        config::symbols::SUCCESS,
-                        pretty(&dest, home_s),
-                        config::symbols::ARROW,
-                        pretty(&src, home_s)
-                    )),
-                    Err(e) => ExecResult::error(format!(
-                        "{} Erro ao criar link para {}: {e}",
-                        config::symbols::ERROR,
-                        pretty(&dest, home_s)
-                    )),
-                }
-            }
-            PlanAction::SkipExists { src, dest } => ExecResult::warning(format!(
-                "{}  Link já existe: {} {} {}",
-                config::symbols::WARNING,
-                pretty(&dest, home_s),
-                config::symbols::ARROW,
-                pretty(&src, home_s)
-            )),
-            PlanAction::Conflict { dest, reason } => ExecResult::error(format!(
-                "{} Conflito: {} ({})", 
-                config::symbols::ERROR,
-                pretty(&dest, home_s),
-                reason
-            )),
-        })
-        .collect()
-}
-
-// Pattern matching simplificado também na função unlink
 #[allow(clippy::needless_pass_by_value)]
 fn unlink_recursive<'a>(
     src: PathBuf,
@@ -440,17 +394,8 @@ fn unlink_recursive<'a>(
     }
 }
 
-// --- Funções de Comando com Collect Estratégico ---
-
-fn main_add(
-    source: &Path,
-    home: &Path,
-    home_s: &str,
-    non_interactive: bool,
-) -> Result<(), DotfilesError> {
-    println!("{}", config::messages::ANALYZING_DOTFILES);
-
-    // MUDANÇA 5: Lazy evaluation até precisarmos do preview
+// Análise pura (sem side effects)
+fn analyze_dotfiles(source: &Path, home: &Path) -> Result<Vec<PlanAction>, DotfilesError> {
     let plan_iterator = fs::read_dir(source)?
         .flatten()
         .filter(|entry| !should_ignore(entry))
@@ -463,45 +408,116 @@ fn main_add(
             )
         });
 
-    // Collect estratégico: só quando precisamos contar e mostrar preview
-    let plan: Vec<PlanAction> = plan_iterator.collect();
-    
-    let to_create: Vec<_> = plan
-        .iter()
-        .filter(|a| matches!(a, PlanAction::CreateLink { .. }))
-        .collect();
+    Ok(plan_iterator.collect())
+}
 
-    if to_create.is_empty() {
+// Filtros puros
+fn filter_actions_to_create(plan: &[PlanAction]) -> Vec<&PlanAction> {
+    plan.iter()
+        .filter(|action| matches!(action, PlanAction::CreateLink { .. }))
+        .collect()
+}
+
+// UI pura para apresentação de plano
+fn present_plan_preview(actions_to_create: &[&PlanAction], home_s: &str) {
+    if actions_to_create.is_empty() {
         println!("{}", config::messages::NO_LINKS_TO_CREATE);
-    } else {
-        println!("\n{}:", config::messages::LINKS_TO_CREATE);
-        // Correção: usar for loop em vez de for_each para side effects
-        for action in &to_create {
-            if let PlanAction::CreateLink { src, dest } = action {
-                println!(
-                    "  {} {} {}",
-                    color(&pretty(dest, home_s), config::colors::GREEN),
-                    config::symbols::ARROW,
-                    pretty(src, home_s)
-                );
-            }
+        return;
+    }
+
+    println!("\n{}:", config::messages::LINKS_TO_CREATE);
+    for action in actions_to_create {
+        if let PlanAction::CreateLink { src, dest } = action {
+            println!(
+                "  {} {} {}",
+                color(&pretty(dest, home_s), config::colors::GREEN),
+                config::symbols::ARROW,
+                pretty(src, home_s)
+            );
         }
-        println!();
-        
-        if !non_interactive
-            && !Confirm::with_theme(&SimpleTheme)
-                .with_prompt(color(config::messages::PROMPT_APPLY_CHANGES, config::colors::WHITE))
-                .default(true)
-                .interact()?
-        {
+    }
+    println!();
+}
+
+// Interação pura com usuário
+fn get_user_confirmation(non_interactive: bool) -> Result<bool, DotfilesError> {
+    if non_interactive {
+        return Ok(true);
+    }
+
+    Confirm::with_theme(&SimpleTheme)
+        .with_prompt(color(config::messages::PROMPT_APPLY_CHANGES, config::colors::WHITE))
+        .default(true)
+        .interact()
+        .map_err(DotfilesError::from)
+}
+
+// Execução pura de plano
+fn execute_plan(plan: Vec<PlanAction>, home_s: &str) -> Vec<ExecResult> {
+    plan.into_iter()
+        .map(|action| match action {
+            PlanAction::CreateLink { src, dest } => {
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent).ok();
+                }
+                match unix_fs::symlink(&src, &dest) {
+                    Ok(()) => ExecResult::success(format!(
+                        "{} Link criado: {} {} {}",
+                        config::symbols::SUCCESS,
+                        pretty(&dest, home_s),
+                        config::symbols::ARROW,
+                        pretty(&src, home_s)
+                    )),
+                    Err(e) => ExecResult::error(format!(
+                        "{} Erro ao criar link para {}: {e}",
+                        config::symbols::ERROR,
+                        pretty(&dest, home_s)
+                    )),
+                }
+            }
+            PlanAction::SkipExists { src, dest } => ExecResult::warning(format!(
+                "{}  Link já existe: {} {} {}",
+                config::symbols::WARNING,
+                pretty(&dest, home_s),
+                config::symbols::ARROW,
+                pretty(&src, home_s)
+            )),
+            PlanAction::Conflict { dest, reason } => ExecResult::error(format!(
+                "{} Conflito: {} ({})", 
+                config::symbols::ERROR,
+                pretty(&dest, home_s),
+                reason
+            )),
+        })
+        .collect()
+}
+
+fn main_add(
+    source: &Path,
+    home: &Path,
+    home_s: &str,
+    non_interactive: bool,
+) -> Result<(), DotfilesError> {
+    println!("{}", config::messages::ANALYZING_DOTFILES);
+    let plan = analyze_dotfiles(source, home)?;
+    
+    let actions_to_create = filter_actions_to_create(&plan);
+    
+    present_plan_preview(&actions_to_create, home_s);
+    
+    if !actions_to_create.is_empty() {
+        let confirmed = get_user_confirmation(non_interactive)?;
+        if !confirmed {
             println!("  {}", config::messages::OPERATION_CANCELLED);
             return Ok(());
         }
     }
-
-    // Execução e relatório com collect estratégico
-    let results = execute_plan(plan, home_s);
-    display_execution_report(&results);
+    
+    // Execução (pura) + Relatório (UI pura)
+    if !actions_to_create.is_empty() {
+        let results = execute_plan(plan, home_s);
+        display_execution_report(&results);
+    }
 
     Ok(())
 }
@@ -550,42 +566,59 @@ fn display_execution_report(results: &[ExecResult]) {
     }
 }
 
-fn main_del(source: &Path, home: &Path, home_s: &str) -> Result<(), DotfilesError> {
-    // MUDANÇA 5: Máxima lazy evaluation - só materializa na última iteração (println)
-    fs::read_dir(source)?
+fn analyze_removals(source: &Path, home: &Path, home_s: &str) -> Result<Vec<String>, DotfilesError> {
+    let removal_messages: Vec<String> = fs::read_dir(source)?
         .flatten()
         .filter(|entry| !should_ignore(entry))
         .flat_map(|entry| {
             unlink_recursive(entry.path(), home.join(entry.file_name()), source, home_s)
         })
-        .for_each(|message| println!("{}", color(&message, config::colors::YELLOW)));
+        .collect();
+    
+    Ok(removal_messages)
+}
+
+fn main_del(source: &Path, home: &Path, home_s: &str) -> Result<(), DotfilesError> {
+    let removal_messages = analyze_removals(source, home, home_s)?;
+    
+    for message in removal_messages {
+        println!("{}", color(&message, config::colors::YELLOW));
+    }
     
     Ok(())
 }
 
-fn get_dotfiles(repo: &str, source: &Path, non_interactive: bool) -> Result<(), DotfilesError> {
+fn validate_and_prepare_directory(source: &Path) -> Result<(), DotfilesError> {
     if source.exists() && fs::read_dir(source)?.next().is_some() {
         println!("  {}", color(config::messages::DOTFILES_EXISTS, config::colors::YELLOW));
-        return Ok(());
+        return Err(DotfilesError::Msg("Diretório já existe".to_string()));
     }
     fs::create_dir_all(source)?;
+    Ok(())
+}
 
-    let repo_url = if repo.starts_with("https://") {
+fn format_repository_url(repo: &str) -> String {
+    if repo.starts_with("https://") {
         repo.to_string()
     } else {
         format!("https://github.com/{repo}")
-    };
+    }
+}
 
-    println!("📥 A clonar {repo_url}...");
-
+fn create_progress_spinner() -> Result<ProgressBar, DotfilesError> {
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(ProgressStyle::default_spinner().template("{spinner:.cyan} {msg}")?);
     spinner.set_message(config::messages::CONTACTING_REMOTE);
     spinner.enable_steady_tick(std::time::Duration::from_millis(config::PROGRESS_TICK_RATE_MS));
+    Ok(spinner)
+}
+
+fn clone_git_repository(repo_url: &str, source: &Path) -> Result<(), DotfilesError> {
+    let spinner = create_progress_spinner()?;
 
     let output = Command::new("git")
         .arg("clone")
-        .arg(&repo_url)
+        .arg(repo_url)
         .arg(source.as_os_str())
         .stderr(Stdio::piped())
         .output()?;
@@ -594,38 +627,93 @@ fn get_dotfiles(repo: &str, source: &Path, non_interactive: bool) -> Result<(), 
 
     if output.status.success() {
         println!("{}", color(config::messages::CLONE_SUCCESS, config::colors::GREEN));
-        println!("\n{}", config::messages::AUTO_EXECUTING_ADD);
-        let home = dirs::home_dir().ok_or(DotfilesError::HomeDirNotFound)?;
-        let home_s = home.to_string_lossy();
-        main_add(source, &home, &home_s, non_interactive)?;
+        Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(DotfilesError::GitCloneFailed(stderr.trim().to_string()));
+        Err(DotfilesError::GitCloneFailed(stderr.trim().to_string()))
     }
-    Ok(())
 }
 
-fn main_sync(source: &Path) -> Result<(), DotfilesError> {
+fn get_dotfiles(repo: &str, source: &Path, non_interactive: bool) -> Result<(), DotfilesError> {
+    if validate_and_prepare_directory(source).is_err() {
+        return Ok(()); // Diretório já existe, saída silenciosa
+    }
+
+    // Formatação de URL (pura)
+    let repo_url = format_repository_url(repo);
+
+    println!("📥 A clonar {repo_url}...");
+
+    clone_git_repository(&repo_url, source)?;
+
+    // Execução automática do add
+    println!("\n{}", config::messages::AUTO_EXECUTING_ADD);
+    let home = dirs::home_dir().ok_or(DotfilesError::HomeDirNotFound)?;
+    let home_s = home.to_string_lossy();
+    main_add(source, &home, &home_s, non_interactive)
+}
+
+fn validate_git_repository(source: &Path) -> Result<(), DotfilesError> {
     if !source.is_dir() {
         return Err(DotfilesError::Msg(format!(
             "O diretório source '{}' não foi encontrado.",
             source.display()
         )));
     }
+    Ok(())
+}
 
-    println!("{}", config::messages::CHECKING_REPO_STATUS);
-
+fn check_repository_changes(source: &Path) -> Result<bool, DotfilesError> {
     let status_output = Command::new("git")
         .current_dir(source)
         .arg("status")
         .arg("--porcelain")
         .output()?;
+        
     if !status_output.status.success() {
         let stderr = String::from_utf8_lossy(&status_output.stderr);
         return Err(DotfilesError::GitCommandFailed(stderr.trim().to_string()));
     }
 
-    if status_output.stdout.is_empty() {
+    Ok(!status_output.stdout.is_empty())
+}
+
+fn get_commit_message() -> Result<String, DotfilesError> {
+    Input::with_theme(&SimpleTheme)
+        .with_prompt(color(config::messages::PROMPT_COMMIT_MESSAGE, config::colors::WHITE))
+        .interact_text()
+        .map_err(DotfilesError::from)
+}
+
+fn perform_git_sync(source: &Path, message: &str) -> Result<(), DotfilesError> {
+    println!("{}", color(config::messages::ADDING_TO_STAGE, config::colors::BLUE));
+    run_git_command(source, &["add", "."], false)?;
+
+    println!(
+        "{}",
+        color(
+            &format!("📝 A fazer commit com a mensagem: \"{message}\""),
+            config::colors::BLUE
+        )
+    );
+    run_git_command(source, &["commit", "-m", message], false)?;
+
+    println!(
+        "{}",
+        color(config::messages::PUSHING_TO_REMOTE, config::colors::BLUE)
+    );
+    run_git_command(source, &["push"], true)
+}
+
+fn main_sync(source: &Path) -> Result<(), DotfilesError> {
+    // 1. Validação (pura)
+    validate_git_repository(source)?;
+    
+    // Verificação de estado (pura)
+    println!("{}", config::messages::CHECKING_REPO_STATUS);
+    let has_changes = check_repository_changes(source)?;
+    
+    if !has_changes {
         println!(
             "{}",
             color(config::messages::NO_CHANGES, config::colors::GREEN)
@@ -637,32 +725,16 @@ fn main_sync(source: &Path) -> Result<(), DotfilesError> {
     run_git_command(source, &["status", "-s"], true)?;
     println!();
 
-    let message: String = Input::with_theme(&SimpleTheme)
-        .with_prompt(color(config::messages::PROMPT_COMMIT_MESSAGE, config::colors::WHITE))
-        .interact_text()?;
+    // Interação com usuário (pura)
+    let message = get_commit_message()?;
 
     if message.trim().is_empty() {
         println!("  {}", config::messages::COMMIT_CANCELLED);
         return Ok(());
     }
 
-    println!("{}", color(config::messages::ADDING_TO_STAGE, config::colors::BLUE));
-    run_git_command(source, &["add", "."], false)?;
-
-    println!(
-        "{}",
-        color(
-            &format!("📝 A fazer commit com a mensagem: \"{message}\""),
-            config::colors::BLUE
-        )
-    );
-    run_git_command(source, &["commit", "-m", &message], false)?;
-
-    println!(
-        "{}",
-        color(config::messages::PUSHING_TO_REMOTE, config::colors::BLUE)
-    );
-    run_git_command(source, &["push"], true)?;
+    // Execução de sync (pura)
+    perform_git_sync(source, &message)?;
 
     println!(
         "\n{}",

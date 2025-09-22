@@ -6,18 +6,19 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::error::Error;
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self};
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+// --- Configuration Module ---
 mod config {
     pub const ANSI_RESET: &str = "\x1b[0m";
     pub const DOTFILES_DIR: &str = ".config/dotfiles";
     pub const PROGRESS_TICK_RATE_MS: u64 = 100;
-    
+
     pub const DEFAULT_IGNORE: &[&str] = &[".git", ".gitignore", "main.hook"];
-    
+
     pub mod colors {
         pub const RED: &str = "31";
         pub const GREEN: &str = "32";
@@ -25,7 +26,7 @@ mod config {
         pub const BLUE: &str = "34";
         pub const WHITE: &str = "37";
     }
-    
+
     pub mod messages {
         pub const GIT_NOT_INSTALLED: &str = "O Git não parece estar instalado ou não está no seu PATH. \nPor favor, instale o Git para continuar.";
         pub const HOME_NOT_FOUND: &str = "Não foi possível encontrar o diretório HOME.";
@@ -66,54 +67,8 @@ mod config {
     }
 }
 
-// --- Funções Auxiliares ---
+// --- Data Structures and Errors ---
 
-fn color(text: &str, code: &str) -> String {
-    format!("\x1b[{code}m{text}{}", config::ANSI_RESET)
-}
-
-fn pretty(path: &Path, home_s: &str) -> String {
-    path.display().to_string().replace(home_s, "~")
-}
-
-fn should_ignore(entry: &fs::DirEntry) -> bool {
-    entry
-        .file_name()
-        .to_str()
-        .is_some_and(|name| config::DEFAULT_IGNORE.contains(&name))
-}
-
-fn build_base_git_command(source: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new("git");
-    command.current_dir(source).args(args);
-    command
-}
-
-fn run_git_command(source: &Path, args: &[&str], inherit_stdio: bool) -> Result<(), DotfilesError> {
-    let status = if inherit_stdio {
-        build_base_git_command(source, args).status()?
-    } else {
-        build_base_git_command(source, args).output()?.status
-    };
-
-    if !status.success() {
-        return Err(DotfilesError::GitCommandFailed(format!(
-            "O comando 'git {}' falhou.",
-            args.join(" ")
-        )));
-    }
-    Ok(())
-}
-
-fn check_git_availability() -> Result<(), DotfilesError> {
-    match Command::new("git").arg("--version").output() {
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(DotfilesError::GitNotInstalled),
-        Err(e) => Err(DotfilesError::IoError(e)),
-    }
-}
-
-// Enum para representar razões de conflito de forma type-safe
 #[derive(Debug, Clone, PartialEq)]
 enum ConflictReason {
     SymlinkPointsElsewhere,
@@ -131,7 +86,6 @@ impl fmt::Display for ConflictReason {
     }
 }
 
-// Status de resultado com type safety
 #[derive(Debug, Clone, PartialEq)]
 enum ResultStatus {
     Success,
@@ -142,27 +96,24 @@ enum ResultStatus {
 enum PlanAction {
     CreateLink { src: PathBuf, dest: PathBuf },
     SkipExists { src: PathBuf, dest: PathBuf },
-    Conflict { dest: PathBuf, reason: ConflictReason }, // Agora type-safe!
+    Conflict { dest: PathBuf, reason: ConflictReason },
 }
 
 struct ExecResult {
     message: String,
-    status: ResultStatus, // Type-safe status
+    status: ResultStatus,
 }
 
 impl ExecResult {
     const fn new(message: String, status: ResultStatus) -> Self {
         Self { message, status }
     }
-
     const fn success(message: String) -> Self {
         Self::new(message, ResultStatus::Success)
     }
-
     const fn warning(message: String) -> Self {
         Self::new(message, ResultStatus::Warning)
     }
-
     const fn error(message: String) -> Self {
         Self::new(message, ResultStatus::Error)
     }
@@ -216,6 +167,8 @@ impl From<TemplateError> for DotfilesError {
     }
 }
 
+// --- Command Line Interface Definition ---
+
 #[derive(Parser, Debug)]
 #[command(version, about = "Um gestor de dotfiles declarativo e preguiçoso", long_about = None)]
 struct Cli {
@@ -242,6 +195,57 @@ enum Commands {
     },
 }
 
+
+// --- Helper Functions ---
+
+fn color(text: &str, code: &str) -> String {
+    format!("\x1b[{code}m{text}{}", config::ANSI_RESET)
+}
+
+fn pretty(path: &Path, home_s: &str) -> String {
+    path.display().to_string().replace(home_s, "~")
+}
+
+fn should_ignore(entry: &fs::DirEntry) -> bool {
+    entry
+        .file_name()
+        .to_str()
+        .is_some_and(|name| config::DEFAULT_IGNORE.contains(&name))
+}
+
+fn build_base_git_command(source: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command.current_dir(source).args(args);
+    command
+}
+
+fn run_git_command(source: &Path, args: &[&str], inherit_stdio: bool) -> Result<(), DotfilesError> {
+    let status = if inherit_stdio {
+        build_base_git_command(source, args).status()?
+    } else {
+        build_base_git_command(source, args).output()?.status
+    };
+
+    if !status.success() {
+        return Err(DotfilesError::GitCommandFailed(format!(
+            "O comando 'git {}' falhou.",
+            args.join(" ")
+        )));
+    }
+    Ok(())
+}
+
+fn check_git_availability() -> Result<(), DotfilesError> {
+    match Command::new("git").arg("--version").output() {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(DotfilesError::GitNotInstalled),
+        Err(e) => Err(DotfilesError::IoError(e)),
+    }
+}
+
+
+// --- Core Logic: Planning and Execution ---
+
 #[allow(clippy::needless_pass_by_value)]
 fn create_plan_recursive<'a>(
     src: PathBuf,
@@ -255,71 +259,41 @@ fn create_plan_recursive<'a>(
     let new_visited = visited.update(src.clone());
 
     match (dest.exists(), dest.is_symlink(), src.is_dir(), dest.is_dir()) {
-        // Destino não existe - criar link
-        (false, _, _, _) => {
-            Box::new(std::iter::once(PlanAction::CreateLink { src, dest }))
-        }
-        
-        // Destino existe e é symlink - verificar se aponta para o local correto
-        (true, true, _, _) => {
-            match fs::read_link(&dest) {
-                Ok(target) if target.starts_with(dotfiles_dir) && target == src => {
-                    Box::new(std::iter::once(PlanAction::SkipExists { src, dest }))
-                }
-                Ok(_) => {
-                    Box::new(std::iter::once(PlanAction::Conflict {
-                        dest,
-                        reason: ConflictReason::SymlinkPointsElsewhere,
-                    }))
-                }
-                Err(_) => {
-                    Box::new(std::iter::once(PlanAction::Conflict {
-                        dest,
-                        reason: ConflictReason::SymlinkReadError,
-                    }))
-                }
+        (false, _, _, _) => Box::new(std::iter::once(PlanAction::CreateLink { src, dest })),
+        (true, true, _, _) => match fs::read_link(&dest) {
+            Ok(target) if target.starts_with(dotfiles_dir) && target == src => {
+                Box::new(std::iter::once(PlanAction::SkipExists { src, dest }))
             }
-        }
-        
-        // Ambos são diretórios - recursão
+            Ok(_) => Box::new(std::iter::once(PlanAction::Conflict {
+                dest,
+                reason: ConflictReason::SymlinkPointsElsewhere,
+            })),
+            Err(_) => Box::new(std::iter::once(PlanAction::Conflict {
+                dest,
+                reason: ConflictReason::SymlinkReadError,
+            })),
+        },
         (true, false, true, true) => {
             let dir_iter = match fs::read_dir(&src) {
                 Ok(iter) => Box::new(iter.flatten()) as Box<dyn Iterator<Item = fs::DirEntry>>,
                 Err(e) => {
-                    eprintln!(
-                        "{}",
-                        color(
-                            &format!(
-                                "Aviso: Não foi possível ler o diretório {}: {e}",
-                                src.display()
-                            ),
-                            config::colors::YELLOW
-                        )
-                    );
+                    eprintln!("{}", color(&format!("Aviso: Não foi possível ler o diretório {}: {e}", src.display()), config::colors::YELLOW));
                     Box::new(std::iter::empty())
                 }
             };
-            Box::new(
-                dir_iter
-                    .filter(|entry| !should_ignore(entry))
-                    .flat_map(move |entry| {
-                        create_plan_recursive(
-                            entry.path(),
-                            dest.join(entry.file_name()),
-                            dotfiles_dir,
-                            new_visited.clone(),
-                        )
-                    }),
-            )
-        }
-        
-        // Qualquer outro caso - conflito
-        (true, false, _, _) => {
-            Box::new(std::iter::once(PlanAction::Conflict {
-                dest,
-                reason: ConflictReason::FileExistsAtDestination,
+            Box::new(dir_iter.filter(|entry| !should_ignore(entry)).flat_map(move |entry| {
+                create_plan_recursive(
+                    entry.path(),
+                    dest.join(entry.file_name()),
+                    dotfiles_dir,
+                    new_visited.clone(),
+                )
             }))
         }
+        (true, false, _, _) => Box::new(std::iter::once(PlanAction::Conflict {
+            dest,
+            reason: ConflictReason::FileExistsAtDestination,
+        })),
     }
 }
 
@@ -330,17 +304,14 @@ fn unlink_recursive<'a>(
     dotfiles_dir: &'a Path,
     home_s: &'a str,
 ) -> Box<dyn Iterator<Item = String> + 'a> {
+    
+    // We combine all conditions into a single match statement for clarity.
     match (dest.exists(), dest.is_symlink(), src.is_dir(), dest.is_dir()) {
-        // Destino não existe - nada a fazer
-        (false, _, _, _) => {
-            Box::new(std::iter::empty())
-        }
-        
-        // Destino é symlink - verificar se é gerenciado por nós
+        // Case 1: Destination is a symlink we manage. Attempt to remove it.
         (true, true, _, _) => {
-            match fs::read_link(&dest) {
-                Ok(target) if target.starts_with(dotfiles_dir) => {
-                    match fs::remove_file(&dest) {
+            if let Ok(target) = fs::read_link(&dest) {
+                if target.starts_with(dotfiles_dir) {
+                    return match fs::remove_file(&dest) {
                         Ok(()) => Box::new(std::iter::once(format!(
                             "{} Link removido: {}",
                             config::symbols::TRASH,
@@ -351,26 +322,21 @@ fn unlink_recursive<'a>(
                             config::symbols::ERROR,
                             pretty(&dest, home_s)
                         ))),
-                    }
+                    };
                 }
-                _ => Box::new(std::iter::empty()),
             }
+            // If it's a symlink but not ours, or we can't read it, do nothing.
+            Box::new(std::iter::empty())
         }
-        
-        // Ambos são diretórios - recursão
+
+        // Case 2: Both are directories. Recurse into them.
         (true, false, true, true) => {
             let dir_iter = match fs::read_dir(&src) {
                 Ok(iter) => Box::new(iter.flatten()) as Box<dyn Iterator<Item = fs::DirEntry>>,
                 Err(e) => {
                     eprintln!(
                         "{}",
-                        color(
-                            &format!(
-                                "Aviso: Não foi possível ler o diretório {}: {e}",
-                                src.display()
-                            ),
-                            config::colors::YELLOW
-                        )
+                        color(&format!("Aviso: Não foi possível ler o diretório {}: {e}", src.display()), config::colors::YELLOW)
                     );
                     Box::new(std::iter::empty())
                 }
@@ -388,15 +354,17 @@ fn unlink_recursive<'a>(
                     }),
             )
         }
-        
-        // Qualquer outro caso - nada a fazer
+
+        // All other cases (destination doesn't exist, it's a file, etc.)
+        // result in doing nothing.
         _ => Box::new(std::iter::empty()),
     }
 }
 
-// Análise pura (sem side effects)
+// --- "Functional Core" Helper Functions ---
+
 fn analyze_dotfiles(source: &Path, home: &Path) -> Result<Vec<PlanAction>, DotfilesError> {
-    let plan_iterator = fs::read_dir(source)?
+    Ok(fs::read_dir(source)?
         .flatten()
         .filter(|entry| !should_ignore(entry))
         .flat_map(|entry| {
@@ -406,19 +374,16 @@ fn analyze_dotfiles(source: &Path, home: &Path) -> Result<Vec<PlanAction>, Dotfi
                 source,
                 HashSet::new(),
             )
-        });
-
-    Ok(plan_iterator.collect())
+        })
+        .collect())
 }
 
-// Filtros puros
 fn filter_actions_to_create(plan: &[PlanAction]) -> Vec<&PlanAction> {
     plan.iter()
         .filter(|action| matches!(action, PlanAction::CreateLink { .. }))
         .collect()
 }
 
-// UI pura para apresentação de plano
 fn present_plan_preview(actions_to_create: &[&PlanAction], home_s: &str) {
     if actions_to_create.is_empty() {
         println!("{}", config::messages::NO_LINKS_TO_CREATE);
@@ -439,20 +404,18 @@ fn present_plan_preview(actions_to_create: &[&PlanAction], home_s: &str) {
     println!();
 }
 
-// Interação pura com usuário
-fn get_user_confirmation(non_interactive: bool) -> Result<bool, DotfilesError> {
+fn get_user_confirmation(prompt: &str, non_interactive: bool) -> Result<bool, DotfilesError> {
     if non_interactive {
         return Ok(true);
     }
 
     Confirm::with_theme(&SimpleTheme)
-        .with_prompt(color(config::messages::PROMPT_APPLY_CHANGES, config::colors::WHITE))
+        .with_prompt(color(prompt, config::colors::WHITE))
         .default(true)
         .interact()
         .map_err(DotfilesError::from)
 }
 
-// Execução pura de plano
 fn execute_plan(plan: Vec<PlanAction>, home_s: &str) -> Vec<ExecResult> {
     plan.into_iter()
         .map(|action| match action {
@@ -476,14 +439,14 @@ fn execute_plan(plan: Vec<PlanAction>, home_s: &str) -> Vec<ExecResult> {
                 }
             }
             PlanAction::SkipExists { src, dest } => ExecResult::warning(format!(
-                "{}  Link já existe: {} {} {}",
+                "{} Link já existe: {} {} {}",
                 config::symbols::WARNING,
                 pretty(&dest, home_s),
                 config::symbols::ARROW,
                 pretty(&src, home_s)
             )),
             PlanAction::Conflict { dest, reason } => ExecResult::error(format!(
-                "{} Conflito: {} ({})", 
+                "{} Conflito: {} ({})",
                 config::symbols::ERROR,
                 pretty(&dest, home_s),
                 reason
@@ -492,52 +455,18 @@ fn execute_plan(plan: Vec<PlanAction>, home_s: &str) -> Vec<ExecResult> {
         .collect()
 }
 
-fn main_add(
-    source: &Path,
-    home: &Path,
-    home_s: &str,
-    non_interactive: bool,
-) -> Result<(), DotfilesError> {
-    println!("{}", config::messages::ANALYZING_DOTFILES);
-    let plan = analyze_dotfiles(source, home)?;
-    
-    let actions_to_create = filter_actions_to_create(&plan);
-    
-    present_plan_preview(&actions_to_create, home_s);
-    
-    if !actions_to_create.is_empty() {
-        let confirmed = get_user_confirmation(non_interactive)?;
-        if !confirmed {
-            println!("  {}", config::messages::OPERATION_CANCELLED);
-            return Ok(());
-        }
-    }
-    
-    // Execução (pura) + Relatório (UI pura)
-    if !actions_to_create.is_empty() {
-        let results = execute_plan(plan, home_s);
-        display_execution_report(&results);
-    }
-
-    Ok(())
-}
-
-// Função pura para relatório com type safety
 fn display_execution_report(results: &[ExecResult]) {
     println!("\n{}", config::messages::OPERATION_REPORT);
-    
-    // Type-safe counting usando o enum ResultStatus
-    let (created_count, conflict_count, warning_count) = results
-        .iter()
-        .fold((0_usize, 0_usize, 0_usize), |(created, conflicts, warnings), result| {
-            match result.status {
-                ResultStatus::Success => (created.saturating_add(1), conflicts, warnings),
-                ResultStatus::Error => (created, conflicts.saturating_add(1), warnings),
-                ResultStatus::Warning => (created, conflicts, warnings.saturating_add(1)),
-            }
-        });
 
-    // Type-safe display usando o enum ResultStatus
+    let counts = results.iter().fold(
+        (0_usize, 0_usize, 0_usize),
+        |(created, conflicts, warnings), result| match result.status {
+            ResultStatus::Success => (created.saturating_add(1), conflicts, warnings),
+            ResultStatus::Error => (created, conflicts.saturating_add(1), warnings),
+            ResultStatus::Warning => (created, conflicts, warnings.saturating_add(1)),
+        },
+    );
+
     for result in results {
         let color_code = match result.status {
             ResultStatus::Success => config::colors::GREEN,
@@ -547,81 +476,23 @@ fn display_execution_report(results: &[ExecResult]) {
         println!("{}", color(&result.message, color_code));
     }
 
-    if created_count > 0 || conflict_count > 0 {
+    if counts.0 > 0 || counts.1 > 0 {
         println!("{}", color(&format!("\n{}", config::messages::SUMMARY), config::colors::BLUE));
-        println!(
-            "{}",
-            color(&format!("  Links criados: {created_count}"), config::colors::GREEN)
-        );
-        println!(
-            "{}",
-            color(&format!("  Conflitos encontrados: {conflict_count}"), config::colors::RED)
-        );
-        if warning_count > 0 {
-            println!(
-                "{}",
-                color(&format!("  Avisos: {warning_count}"), config::colors::YELLOW)
-            );
+        println!("{}", color(&format!("  Links criados: {}", counts.0), config::colors::GREEN));
+        println!("{}", color(&format!("  Conflitos encontrados: {}", counts.1), config::colors::RED));
+        if counts.2 > 0 {
+            println!("{}", color(&format!("  Avisos: {}", counts.2), config::colors::YELLOW));
         }
     }
 }
 
-fn analyze_removals(source: &Path, home: &Path, home_s: &str) -> Result<Vec<String>, DotfilesError> {
-    let removal_messages: Vec<String> = fs::read_dir(source)?
-        .flatten()
-        .filter(|entry| !should_ignore(entry))
-        .flat_map(|entry| {
-            unlink_recursive(entry.path(), home.join(entry.file_name()), source, home_s)
-        })
-        .collect();
-    
-    Ok(removal_messages)
-}
-
-fn main_del(source: &Path, home: &Path, home_s: &str) -> Result<(), DotfilesError> {
-    let removal_messages = analyze_removals(source, home, home_s)?;
-    
-    for message in removal_messages {
-        println!("{}", color(&message, config::colors::YELLOW));
-    }
-    
-    Ok(())
-}
-
-fn validate_and_prepare_directory(source: &Path) -> Result<(), DotfilesError> {
-    if source.exists() && fs::read_dir(source)?.next().is_some() {
-        println!("  {}", color(config::messages::DOTFILES_EXISTS, config::colors::YELLOW));
-        return Err(DotfilesError::Msg("Diretório já existe".to_string()));
-    }
-    fs::create_dir_all(source)?;
-    Ok(())
-}
-
-fn format_repository_url(repo: &str) -> String {
-    if repo.starts_with("https://") {
-        repo.to_string()
-    } else {
-        format!("https://github.com/{repo}")
-    }
-}
-
-fn create_progress_spinner() -> Result<ProgressBar, DotfilesError> {
+fn clone_git_repository(repo_url: &str, source: &Path) -> Result<(), DotfilesError> {
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(ProgressStyle::default_spinner().template("{spinner:.cyan} {msg}")?);
     spinner.set_message(config::messages::CONTACTING_REMOTE);
     spinner.enable_steady_tick(std::time::Duration::from_millis(config::PROGRESS_TICK_RATE_MS));
-    Ok(spinner)
-}
 
-fn clone_git_repository(repo_url: &str, source: &Path) -> Result<(), DotfilesError> {
-    let spinner = create_progress_spinner()?;
-
-    let output = Command::new("git")
-        .arg("clone")
-        .arg(repo_url)
-        .arg(source.as_os_str())
-        .stderr(Stdio::piped())
-        .output()?;
+    let output = Command::new("git").arg("clone").arg(repo_url).arg(source.as_os_str()).stderr(Stdio::piped()).output()?;
 
     spinner.finish_and_clear();
 
@@ -634,47 +505,12 @@ fn clone_git_repository(repo_url: &str, source: &Path) -> Result<(), DotfilesErr
     }
 }
 
-fn get_dotfiles(repo: &str, source: &Path, non_interactive: bool) -> Result<(), DotfilesError> {
-    if validate_and_prepare_directory(source).is_err() {
-        return Ok(()); // Diretório já existe, saída silenciosa
-    }
-
-    // Formatação de URL (pura)
-    let repo_url = format_repository_url(repo);
-
-    println!("📥 A clonar {repo_url}...");
-
-    clone_git_repository(&repo_url, source)?;
-
-    // Execução automática do add
-    println!("\n{}", config::messages::AUTO_EXECUTING_ADD);
-    let home = dirs::home_dir().ok_or(DotfilesError::HomeDirNotFound)?;
-    let home_s = home.to_string_lossy();
-    main_add(source, &home, &home_s, non_interactive)
-}
-
-fn validate_git_repository(source: &Path) -> Result<(), DotfilesError> {
-    if !source.is_dir() {
-        return Err(DotfilesError::Msg(format!(
-            "O diretório source '{}' não foi encontrado.",
-            source.display()
-        )));
-    }
-    Ok(())
-}
-
 fn check_repository_changes(source: &Path) -> Result<bool, DotfilesError> {
-    let status_output = Command::new("git")
-        .current_dir(source)
-        .arg("status")
-        .arg("--porcelain")
-        .output()?;
-        
+    let status_output = Command::new("git").current_dir(source).arg("status").arg("--porcelain").output()?;
     if !status_output.status.success() {
         let stderr = String::from_utf8_lossy(&status_output.stderr);
         return Err(DotfilesError::GitCommandFailed(stderr.trim().to_string()));
     }
-
     Ok(!status_output.stdout.is_empty())
 }
 
@@ -689,35 +525,72 @@ fn perform_git_sync(source: &Path, message: &str) -> Result<(), DotfilesError> {
     println!("{}", color(config::messages::ADDING_TO_STAGE, config::colors::BLUE));
     run_git_command(source, &["add", "."], false)?;
 
-    println!(
-        "{}",
-        color(
-            &format!("📝 A fazer commit com a mensagem: \"{message}\""),
-            config::colors::BLUE
-        )
-    );
+    println!("{}", color(&format!("📝 A fazer commit com a mensagem: \"{message}\""), config::colors::BLUE));
     run_git_command(source, &["commit", "-m", message], false)?;
 
-    println!(
-        "{}",
-        color(config::messages::PUSHING_TO_REMOTE, config::colors::BLUE)
-    );
+    println!("{}", color(config::messages::PUSHING_TO_REMOTE, config::colors::BLUE));
     run_git_command(source, &["push"], true)
 }
 
+
+// --- Command Functions (The "Imperative Shell") ---
+
+fn main_add(source: &Path, home: &Path, home_s: &str, non_interactive: bool) -> Result<(), DotfilesError> {
+    println!("{}", config::messages::ANALYZING_DOTFILES);
+    let plan = analyze_dotfiles(source, home)?;
+    let actions_to_create = filter_actions_to_create(&plan);
+    
+    present_plan_preview(&actions_to_create, home_s);
+
+    if !actions_to_create.is_empty() && !get_user_confirmation(config::messages::PROMPT_APPLY_CHANGES, non_interactive)? {
+             println!("  {}", config::messages::OPERATION_CANCELLED);
+             return Ok(());
+    }
+
+    let results = execute_plan(plan, home_s);
+    display_execution_report(&results);
+    Ok(())
+}
+
+fn main_del(source: &Path, home: &Path, home_s: &str) -> Result<(), DotfilesError> {
+    fs::read_dir(source)?
+        .flatten()
+        .filter(|entry| !should_ignore(entry))
+        .flat_map(|entry| unlink_recursive(entry.path(), home.join(entry.file_name()), source, home_s))
+        .for_each(|r| println!("{}", color(&r, config::colors::YELLOW)));
+    Ok(())
+}
+
+fn get_dotfiles(repo: &str, source: &Path, non_interactive: bool) -> Result<(), DotfilesError> {
+    if source.exists() && fs::read_dir(source)?.next().is_some() {
+        println!("  {}", color(config::messages::DOTFILES_EXISTS, config::colors::YELLOW));
+        return Ok(());
+    }
+    fs::create_dir_all(source)?;
+
+    let repo_url = if repo.starts_with("https://") {
+        repo.to_string()
+    } else {
+        format!("https://github.com/{repo}")
+    };
+
+    println!("📥 A clonar {repo_url}...");
+    clone_git_repository(&repo_url, source)?;
+
+    println!("\n{}", config::messages::AUTO_EXECUTING_ADD);
+    let home = dirs::home_dir().ok_or(DotfilesError::HomeDirNotFound)?;
+    let home_s = home.to_string_lossy();
+    main_add(source, &home, &home_s, non_interactive)
+}
+
 fn main_sync(source: &Path) -> Result<(), DotfilesError> {
-    // 1. Validação (pura)
-    validate_git_repository(source)?;
-    
-    // Verificação de estado (pura)
+    if !source.is_dir() {
+        return Err(DotfilesError::Msg(format!("O diretório source '{}' não foi encontrado.", source.display())));
+    }
+
     println!("{}", config::messages::CHECKING_REPO_STATUS);
-    let has_changes = check_repository_changes(source)?;
-    
-    if !has_changes {
-        println!(
-            "{}",
-            color(config::messages::NO_CHANGES, config::colors::GREEN)
-        );
+    if !check_repository_changes(source)? {
+        println!("{}", color(config::messages::NO_CHANGES, config::colors::GREEN));
         return Ok(());
     }
 
@@ -725,33 +598,19 @@ fn main_sync(source: &Path) -> Result<(), DotfilesError> {
     run_git_command(source, &["status", "-s"], true)?;
     println!();
 
-    // Interação com usuário (pura)
     let message = get_commit_message()?;
-
     if message.trim().is_empty() {
         println!("  {}", config::messages::COMMIT_CANCELLED);
         return Ok(());
     }
 
-    // Execução de sync (pura)
     perform_git_sync(source, &message)?;
-
-    println!(
-        "\n{}",
-        color(config::messages::SYNC_SUCCESS, config::colors::GREEN)
-    );
-
+    println!("\n{}", color(config::messages::SYNC_SUCCESS, config::colors::GREEN));
     Ok(())
 }
 
-// --- Ponto de Entrada ---
 
-fn main() {
-    if let Err(e) = run_app() {
-        eprintln!("{e}");
-        std::process::exit(1);
-    }
-}
+// --- Entry Point ---
 
 fn run_app() -> Result<(), DotfilesError> {
     check_git_availability()?;
@@ -776,5 +635,12 @@ fn run_app() -> Result<(), DotfilesError> {
             },
             |repo| get_dotfiles(&repo, &source, cli.yes),
         ),
+    }
+}
+
+fn main() {
+    if let Err(e) = run_app() {
+        eprintln!("{e}");
+        std::process::exit(1);
     }
 }
